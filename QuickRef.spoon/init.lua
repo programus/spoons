@@ -216,21 +216,32 @@ end
 --- Parameters:
 ---  * rect - The position of the window, default at the mouse pointer with 400 x 200 size.
 ---  * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85
+---
+--- Returns:
+---  * An instance of hs.webview that show the content.
 function obj.showBlank(rect, alpha)
   return showText(redt, '', alpha)
 end
 
---- QuickRef.showTopMostWindow([rect])
+--- QuickRef.showFrontmostWindowCapture([rect])
 --- Function
 --- Show a new image window with snapshot of current top most window as its content.
 ---
 --- Parameters:
 ---  * rect - The position of the window, default at the mouse pointer and the same size as the target window.
 ---  * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85
-function obj.showTopMostWindowCapture(rect, alpha)
+---
+--- Returns:
+---  * An instance of hs.webview that show the content.
+function obj.showFrontmostWindowCapture(rect, alpha)
   local window = hs.window.frontmostWindow()
   local image = window:snapshot()
-  return showImage(rect, image, nil, alpha)
+  if image then
+    return showImage(rect, image, nil, alpha)
+  else
+    hs.alert('There is no front most window')
+    return nil
+  end
 end
 
 --- QuickRef.showPasteboard([rect])
@@ -240,6 +251,9 @@ end
 --- Parameters:
 ---  * rect - The position of the window, default at the mouse pointer.
 ---  * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85
+---
+--- Returns:
+---  * An instance of hs.webview that show the content.
 function obj.showPasteboard(rect, alpha)
   local clipType = hs.pasteboard.typesAvailable()
   if clipType.image then
@@ -251,6 +265,24 @@ function obj.showPasteboard(rect, alpha)
   else
     return showText(rect, '', alpha)
   end
+end
+
+--- QuickRef:bindHotKeys(mapping)
+--- Method
+--- Binds hotkeys for QuickRef
+---
+--- Parameters:
+---  * mapping - A table containing hotkey modifier/key details for the following items:
+---   * show_blank - showBlank() function
+---   * show_frontmost_window_capture - showFrontmostWindowCapture() function
+---   * show_pasteboard - showPasteboard() function
+function obj:bindHotKeys(mapping)
+  local def = {
+    show_blank = obj.showBlank,
+    show_frontmost_window_capture = obj.showFrontmostWindowCapture,
+    show_pasteboard = obj.showPasteboard
+  }
+  hs.spoons.bindHotkeysToSpec(def, mapping)
 end
 
 return obj
