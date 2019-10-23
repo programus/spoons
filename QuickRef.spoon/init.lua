@@ -261,7 +261,7 @@ function obj.showPasteboard(rect, alpha)
     return showImage(rect, image, 1, alpha)
   elseif clipType.string then
     local text = hs.pasteboard.readString()
-    return showText(rect, text, alpha)
+    return showText(rect, text or '', alpha)
   else
     return showText(rect, '', alpha)
   end
