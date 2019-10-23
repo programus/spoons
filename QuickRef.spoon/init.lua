@@ -141,12 +141,20 @@ end
 
 local function setupWebview(wv, uc)
   wv:transparent(true)
-  wv:windowStyle(15)
+  wv:windowStyle(
+    hs.webview.windowMasks.titled|
+    hs.webview.windowMasks.closable|
+    hs.webview.windowMasks.miniaturizable|
+    hs.webview.windowMasks.resizable|
+    hs.webview.windowMasks.nonactivating)
   wv:allowGestures(true)
   wv:allowMagnificationGestures(true)
   wv:allowTextEntry(true)
   wv:bringToFront(true)
   wv:deleteOnClose(true)
+  wv:behavior(
+    hs.drawing.windowBehaviors.canJoinAllSpaces|
+    hs.drawing.windowBehaviors.fullScreenAuxiliary)
 
   uc:injectScript({
       source = [[
@@ -166,7 +174,7 @@ local function defaultRect(size)
   if not size then
     size = {w = 400, h = 200}
   end
-  local point = hs.mouse.getRelativePosition()
+  local point = hs.mouse.getAbsolutePosition()
   return {
     x = point.x - size.w / 2,
     y = point.y + 10,

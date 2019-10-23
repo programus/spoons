@@ -1,0 +1,224 @@
+[
+  {
+    "Constant" : [
+
+    ],
+    "submodules" : [
+
+    ],
+    "Function" : [
+      {
+        "doc" : "Show a new text window with blank content.\n\nParameters:\n * rect - The position of the window, default at the mouse pointer with 400 x 200 size.\n * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85\n\nReturns:\n * An instance of hs.webview that show the content.",
+        "def" : "QuickRef.showBlank([rect], [alpha])",
+        "stripped_doc" : [
+          "Show a new text window with blank content.",
+          ""
+        ],
+        "parameters" : [
+          " * rect - The position of the window, default at the mouse pointer with 400 x 200 size.",
+          " * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85",
+          ""
+        ],
+        "notes" : [
+
+        ],
+        "signature" : "QuickRef.showBlank([rect], [alpha])",
+        "type" : "Function",
+        "returns" : [
+          " * An instance of hs.webview that show the content."
+        ],
+        "name" : "showBlank",
+        "desc" : "Show a new text window with blank content."
+      },
+      {
+        "doc" : "Show a new image window with snapshot of current top most window as its content.\n\nParameters:\n * rect - The position of the window, default at the mouse pointer and the same size as the target window.\n * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85\n\nReturns:\n * An instance of hs.webview that show the content.",
+        "def" : "QuickRef.showFrontmostWindowCapture([rect])",
+        "stripped_doc" : [
+          "Show a new image window with snapshot of current top most window as its content.",
+          ""
+        ],
+        "parameters" : [
+          " * rect - The position of the window, default at the mouse pointer and the same size as the target window.",
+          " * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85",
+          ""
+        ],
+        "notes" : [
+
+        ],
+        "signature" : "QuickRef.showFrontmostWindowCapture([rect])",
+        "type" : "Function",
+        "returns" : [
+          " * An instance of hs.webview that show the content."
+        ],
+        "name" : "showFrontmostWindowCapture",
+        "desc" : "Show a new image window with snapshot of current top most window as its content."
+      },
+      {
+        "doc" : "Show a new window with content of pasteboard. If there is nothing in pasteboard, a blank window will be shown.\n\nParameters:\n * rect - The position of the window, default at the mouse pointer.\n * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85\n\nReturns:\n * An instance of hs.webview that show the content.",
+        "def" : "QuickRef.showPasteboard([rect])",
+        "stripped_doc" : [
+          "Show a new window with content of pasteboard. If there is nothing in pasteboard, a blank window will be shown.",
+          ""
+        ],
+        "parameters" : [
+          " * rect - The position of the window, default at the mouse pointer.",
+          " * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85",
+          ""
+        ],
+        "notes" : [
+
+        ],
+        "signature" : "QuickRef.showPasteboard([rect])",
+        "type" : "Function",
+        "returns" : [
+          " * An instance of hs.webview that show the content."
+        ],
+        "name" : "showPasteboard",
+        "desc" : "Show a new window with content of pasteboard. If there is nothing in pasteboard, a blank window will be shown."
+      }
+    ],
+    "Variable" : [
+
+    ],
+    "stripped_doc" : [
+
+    ],
+    "Deprecated" : [
+
+    ],
+    "type" : "Module",
+    "desc" : "Open a always on top quick reference window from the clipboard, current window, etc.",
+    "Constructor" : [
+
+    ],
+    "doc" : "Open a always on top quick reference window from the clipboard, current window, etc.",
+    "Method" : [
+      {
+        "doc" : "Binds hotkeys for QuickRef\n\nParameters:\n * mapping - A table containing hotkey modifier\/key details for the following items:\n  * show_blank - showBlank() function\n  * show_frontmost_window_capture - showFrontmostWindowCapture() function\n  * show_pasteboard - showPasteboard() function",
+        "def" : "QuickRef:bindHotKeys(mapping)",
+        "stripped_doc" : [
+          "Binds hotkeys for QuickRef",
+          ""
+        ],
+        "parameters" : [
+          " * mapping - A table containing hotkey modifier\/key details for the following items:",
+          "  * show_blank - showBlank() function",
+          "  * show_frontmost_window_capture - showFrontmostWindowCapture() function",
+          "  * show_pasteboard - showPasteboard() function"
+        ],
+        "notes" : [
+
+        ],
+        "signature" : "QuickRef:bindHotKeys(mapping)",
+        "type" : "Method",
+        "returns" : [
+
+        ],
+        "name" : "bindHotKeys",
+        "desc" : "Binds hotkeys for QuickRef"
+      }
+    ],
+    "Command" : [
+
+    ],
+    "Field" : [
+
+    ],
+    "items" : [
+      {
+        "doc" : "Show a new text window with blank content.\n\nParameters:\n * rect - The position of the window, default at the mouse pointer with 400 x 200 size.\n * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85\n\nReturns:\n * An instance of hs.webview that show the content.",
+        "def" : "QuickRef.showBlank([rect], [alpha])",
+        "stripped_doc" : [
+          "Show a new text window with blank content.",
+          ""
+        ],
+        "parameters" : [
+          " * rect - The position of the window, default at the mouse pointer with 400 x 200 size.",
+          " * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85",
+          ""
+        ],
+        "notes" : [
+
+        ],
+        "signature" : "QuickRef.showBlank([rect], [alpha])",
+        "type" : "Function",
+        "returns" : [
+          " * An instance of hs.webview that show the content."
+        ],
+        "name" : "showBlank",
+        "desc" : "Show a new text window with blank content."
+      },
+      {
+        "doc" : "Show a new image window with snapshot of current top most window as its content.\n\nParameters:\n * rect - The position of the window, default at the mouse pointer and the same size as the target window.\n * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85\n\nReturns:\n * An instance of hs.webview that show the content.",
+        "def" : "QuickRef.showFrontmostWindowCapture([rect])",
+        "stripped_doc" : [
+          "Show a new image window with snapshot of current top most window as its content.",
+          ""
+        ],
+        "parameters" : [
+          " * rect - The position of the window, default at the mouse pointer and the same size as the target window.",
+          " * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85",
+          ""
+        ],
+        "notes" : [
+
+        ],
+        "signature" : "QuickRef.showFrontmostWindowCapture([rect])",
+        "type" : "Function",
+        "returns" : [
+          " * An instance of hs.webview that show the content."
+        ],
+        "name" : "showFrontmostWindowCapture",
+        "desc" : "Show a new image window with snapshot of current top most window as its content."
+      },
+      {
+        "doc" : "Show a new window with content of pasteboard. If there is nothing in pasteboard, a blank window will be shown.\n\nParameters:\n * rect - The position of the window, default at the mouse pointer.\n * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85\n\nReturns:\n * An instance of hs.webview that show the content.",
+        "def" : "QuickRef.showPasteboard([rect])",
+        "stripped_doc" : [
+          "Show a new window with content of pasteboard. If there is nothing in pasteboard, a blank window will be shown.",
+          ""
+        ],
+        "parameters" : [
+          " * rect - The position of the window, default at the mouse pointer.",
+          " * alpha - The alpha of the window. 0 is transparent, 100 is solid, default: 85",
+          ""
+        ],
+        "notes" : [
+
+        ],
+        "signature" : "QuickRef.showPasteboard([rect])",
+        "type" : "Function",
+        "returns" : [
+          " * An instance of hs.webview that show the content."
+        ],
+        "name" : "showPasteboard",
+        "desc" : "Show a new window with content of pasteboard. If there is nothing in pasteboard, a blank window will be shown."
+      },
+      {
+        "doc" : "Binds hotkeys for QuickRef\n\nParameters:\n * mapping - A table containing hotkey modifier\/key details for the following items:\n  * show_blank - showBlank() function\n  * show_frontmost_window_capture - showFrontmostWindowCapture() function\n  * show_pasteboard - showPasteboard() function",
+        "def" : "QuickRef:bindHotKeys(mapping)",
+        "stripped_doc" : [
+          "Binds hotkeys for QuickRef",
+          ""
+        ],
+        "parameters" : [
+          " * mapping - A table containing hotkey modifier\/key details for the following items:",
+          "  * show_blank - showBlank() function",
+          "  * show_frontmost_window_capture - showFrontmostWindowCapture() function",
+          "  * show_pasteboard - showPasteboard() function"
+        ],
+        "notes" : [
+
+        ],
+        "signature" : "QuickRef:bindHotKeys(mapping)",
+        "type" : "Method",
+        "returns" : [
+
+        ],
+        "name" : "bindHotKeys",
+        "desc" : "Binds hotkeys for QuickRef"
+      }
+    ],
+    "name" : "QuickRef"
+  }
+]
