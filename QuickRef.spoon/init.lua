@@ -150,7 +150,7 @@ local function setupWebview(wv, uc)
   wv:allowGestures(true)
   wv:allowMagnificationGestures(true)
   wv:allowTextEntry(true)
-  wv:bringToFront(true)
+  wv:level(hs.drawing.windowLevels.utility)
   wv:deleteOnClose(true)
   wv:behavior(
     hs.drawing.windowBehaviors.canJoinAllSpaces|
