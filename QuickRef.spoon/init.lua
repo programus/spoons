@@ -3,6 +3,9 @@
 --- Open a always on top quick reference window from the clipboard, current window, etc.
 ---
 
+---@diagnostic disable-next-line: undefined-global
+hs = hs
+
 local obj={}
 obj.__index = obj
 
@@ -228,7 +231,7 @@ end
 --- Returns:
 ---  * An instance of hs.webview that show the content.
 function obj.showBlank(rect, alpha)
-  return showText(redt, '', alpha)
+  return showText(rect, '', alpha)
 end
 
 --- QuickRef.showFrontmostWindowCapture([rect])
