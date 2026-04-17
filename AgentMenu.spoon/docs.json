@@ -1,0 +1,10 @@
+{
+  "name": "AgentMenu",
+  "version": "0.1",
+  "author": "programus <programus@gmail.com>",
+  "homepage": "https://github.com/programus/spoons",
+  "license": "MIT - https://opensource.org/licenses/MIT",
+  "description": "AI Agent toolbar and hotkey menu for Hammerspoon. Supports OpenAI-compatible APIs, configurable actions, floating selection toolbar, and hotkey-triggered chooser.",
+  "spoonPath": "AgentMenu.spoon",
+  "doc": []
+}
