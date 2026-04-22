@@ -103,45 +103,64 @@ local function runAction(actionName, selectedText)
     local prompt = utils.fillTemplate(act.prompt, allParams)
     log.d("runAction: filled prompt (" .. #prompt .. " chars): " .. prompt:sub(1, 200))
 
+    -- Conversation history accumulates across follow-ups
+    local messages = { { role = "user", content = prompt } }
+
+    -- ── Streaming AI call (used for initial call and each follow-up) ──────
+    local function callAI(cancelled_ref, cancelHandle)
+      log.d("runAction: calling AI (stream), profile='" .. tostring(act.modelSetProfile) .. "'")
+      cancelHandle.fn = ai.callStream(cfg, act.modelSetProfile, messages,
+        function(chunkText)
+          if not cancelled_ref[1] then
+            resultUI.appendChunk(chunkText)
+          end
+        end,
+        function(aiErr, result, modelName, providerName)
+          if cancelled_ref[1] then return end
+          if aiErr then
+            log.e("runAction: AI error: " .. tostring(aiErr))
+            resultUI.hideLoading()
+            hs.alert.show("[AgentMenu] " .. aiErr)
+            return
+          end
+          log.d("runAction: AI success, result " .. tostring(result and #result .. " chars" or "nil"))
+          -- Append assistant turn to conversation history
+          messages[#messages + 1] = { role = "assistant", content = result }
+          resultUI.show(
+            result,
+            act.outputMode,
+            act.replaceFallback or cfg.replaceFallback,
+            selectedText,
+            inputText,
+            modelName,
+            providerName
+          )
+        end
+      )
+    end
+
     -- 6. Open dialog in loading state near mouse; Cancel button aborts the response
-    local cancelled = false
-    local cancelHandle = { fn = nil }
+    local cancelled_ref = { false }
+    local cancelHandle  = { fn = nil }
+
+    local function onFollowup(userText)
+      if not userText or userText == "" then return end
+      log.d("runAction: follow-up: " .. userText)
+      messages[#messages + 1] = { role = "user", content = userText }
+      cancelled_ref = { false }
+      cancelHandle  = { fn = nil }
+      resultUI.startFollowupLoading()
+      callAI(cancelled_ref, cancelHandle)
+    end
+
     resultUI.showLoading(inputText, function()
       log.d("runAction: cancelled by user")
-      cancelled = true
+      cancelled_ref[1] = true
       if cancelHandle.fn then cancelHandle.fn() end
-    end)
+    end, onFollowup)
 
-    -- 7. Call AI (streaming)
-    log.d("runAction: calling AI (stream), profile='" .. tostring(act.modelSetProfile) .. "'")
-    local messages = { { role = "user", content = prompt } }
-    cancelHandle.fn = ai.callStream(cfg, act.modelSetProfile, messages,
-      function(chunkText)
-        if not cancelled then
-          resultUI.appendChunk(chunkText)
-        end
-      end,
-      function(aiErr, result, modelName, providerName)
-        if cancelled then return end
-        -- 8. Handle result
-        if aiErr then
-          log.e("runAction: AI error: " .. tostring(aiErr))
-          resultUI.hideLoading()
-          hs.alert.show("[AgentMenu] " .. aiErr)
-          return
-        end
-        log.d("runAction: AI success, result " .. tostring(result and #result .. " chars" or "nil"))
-        resultUI.show(
-          result,
-          act.outputMode,
-          act.replaceFallback or cfg.replaceFallback,
-          selectedText,
-          inputText,
-          modelName,
-          providerName
-        )
-      end
-    )
+    -- 7. Initial AI call
+    callAI(cancelled_ref, cancelHandle)
   end)
 end
 
