@@ -168,6 +168,20 @@ body {
 .dot:nth-child(2) { animation-delay: 0.2s; }
 .dot:nth-child(3) { animation-delay: 0.4s; }
 @keyframes blink { 0%%,80%%,100%%{opacity:0.2} 40%%{opacity:1} }
+#content {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  line-height: 1.6;
+}
+#stream-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 14px;
+  margin: 0;
+}
 </style>
 </head>
 <body>
@@ -179,9 +193,22 @@ body {
   Thinking
   <span class="dot">●</span><span class="dot">●</span><span class="dot">●</span>
 </div>
+<div id="content">
+  <pre id="stream-text"></pre>
+</div>
 <script>
 function cancelAction() {
   webkit.messageHandlers.agentMenuResult.postMessage({ action: "cancel" });
+}
+function appendStreamChunk(text) {
+  var loading = document.getElementById("loading");
+  var content = document.getElementById("content");
+  if (loading.style.display !== "none") {
+    loading.style.display = "none";
+    content.style.display = "block";
+  }
+  document.getElementById("stream-text").textContent += text;
+  content.scrollTop = content.scrollHeight;
 }
 </script>
 </body>
@@ -239,6 +266,16 @@ function M.hideLoading()
   if dialogIsLoading then
     closeDialog()
   end
+end
+
+--- Append a streaming text chunk to the loading dialog.
+-- Hides the spinner on first call and appends text to the stream area.
+--@param chunkText string  The new text delta to append
+function M.appendChunk(chunkText)
+  if not dialogWebview or not dialogIsLoading then return end
+  local encoded  = hs.json.encode({ chunkText })
+  local jsonChunk = encoded:match("^%[(.-)%]$") or encoded
+  dialogWebview:evaluateJavaScript("appendStreamChunk(" .. jsonChunk .. ");")
 end
 
 -- ── Inline marked.js (minified subset) ───────────────────────────────────
@@ -418,7 +455,7 @@ function M.show(text, mode, replaceFallback, selectedText, inputText, modelName,
     if replaced then
       closeDialog()  -- close loading dialog on success
     else
-      M.show(text, replaceFallback, "dialog", selectedText, inputText)  -- fallback
+      M.show(text, "dialog", replaceFallback, selectedText, inputText, modelName, providerName)  -- fallback
     end
 
   else  -- "dialog" (default)

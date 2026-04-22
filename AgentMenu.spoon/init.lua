@@ -102,34 +102,43 @@ local function runAction(actionName, selectedText)
 
     -- 6. Open dialog in loading state near mouse; Cancel button aborts the response
     local cancelled = false
+    local cancelHandle = { fn = nil }
     resultUI.showLoading(inputText, function()
       log.d("runAction: cancelled by user")
       cancelled = true
+      if cancelHandle.fn then cancelHandle.fn() end
     end)
 
-    -- 7. Call AI
-    log.d("runAction: calling AI, profile='" .. tostring(act.modelSetProfile) .. "'")
+    -- 7. Call AI (streaming)
+    log.d("runAction: calling AI (stream), profile='" .. tostring(act.modelSetProfile) .. "'")
     local messages = { { role = "user", content = prompt } }
-    ai.call(cfg, act.modelSetProfile, messages, function(aiErr, result, modelName, providerName)
-      if cancelled then return end
-      -- 8. Handle result
-      if aiErr then
-        log.e("runAction: AI error: " .. tostring(aiErr))
-        resultUI.hideLoading()
-        hs.alert.show("[AgentMenu] " .. aiErr)
-        return
+    cancelHandle.fn = ai.callStream(cfg, act.modelSetProfile, messages,
+      function(chunkText)
+        if not cancelled then
+          resultUI.appendChunk(chunkText)
+        end
+      end,
+      function(aiErr, result, modelName, providerName)
+        if cancelled then return end
+        -- 8. Handle result
+        if aiErr then
+          log.e("runAction: AI error: " .. tostring(aiErr))
+          resultUI.hideLoading()
+          hs.alert.show("[AgentMenu] " .. aiErr)
+          return
+        end
+        log.d("runAction: AI success, result " .. tostring(result and #result .. " chars" or "nil"))
+        resultUI.show(
+          result,
+          act.outputMode,
+          act.replaceFallback or cfg.replaceFallback,
+          selectedText,
+          inputText,
+          modelName,
+          providerName
+        )
       end
-      log.d("runAction: AI success, result " .. tostring(result and #result .. " chars" or "nil"))
-      resultUI.show(
-        result,
-        act.outputMode,
-        act.replaceFallback or cfg.replaceFallback,
-        selectedText,
-        inputText,
-        modelName,
-        providerName
-      )
-    end)
+    )
   end)
 end
 

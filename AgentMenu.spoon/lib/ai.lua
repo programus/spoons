@@ -77,6 +77,95 @@ local function attemptModel(cfg, modelId, messages, onSuccess, onFail)
   end)
 end
 
+--- Stream one model call via hs.task + curl SSE.
+-- onChunk(deltaText) is called for each content delta.
+-- onSuccess(fullContent, modelName, providerName) is called when the stream ends.
+-- onFail(errMsg) is called when no content was received (triggers fallback).
+-- Returns a cancel function.
+local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, onFail)
+  local model    = cfg._modelById[modelId]
+  local provider = cfg._providerByName[model.provider]
+  local url      = provider.baseUrl .. "/chat/completions"
+  local body     = hs.json.encode({
+    model    = model.name,
+    messages = messages,
+    stream   = true,
+  })
+
+  log.d("attemptModelStream: POST " .. url .. " model=" .. model.name .. " (id: " .. modelId .. ")")
+
+  local fullContent = ""
+  local lineBuffer  = ""
+
+  local function processLine(line)
+    if line:sub(1, 5) ~= "data:" then return end
+    -- SSE allows optional single space after "data:" — strip it if present
+    local data = line:sub(6)
+    if data:sub(1, 1) == " " then data = data:sub(2) end
+    if data == "[DONE]" then return end
+    local ok, decoded = pcall(hs.json.decode, data)
+    if not ok or type(decoded) ~= "table" then return end
+    if decoded.error then
+      log.w("attemptModelStream: API error in stream: " .. hs.json.encode(decoded.error))
+    end
+    local choices = decoded.choices
+    if type(choices) ~= "table" or #choices == 0 then return end
+    local delta = choices[1].delta
+    if type(delta) == "table" and type(delta.content) == "string" and #delta.content > 0 then
+      fullContent = fullContent .. delta.content
+      onChunk(delta.content)
+    end
+  end
+
+  local streamCb = function(_task, stdout, stderr)
+    if stderr and #stderr > 0 then
+      log.w("attemptModelStream: stderr: " .. stderr:sub(1, 500))
+    end
+    if stdout and #stdout > 0 then
+      lineBuffer = lineBuffer .. stdout
+      while true do
+        local nl = lineBuffer:find("\n", 1, true)
+        if not nl then break end
+        local line = lineBuffer:sub(1, nl - 1):gsub("\r$", "")
+        lineBuffer  = lineBuffer:sub(nl + 1)
+        processLine(line)
+      end
+    end
+    return true
+  end
+
+  local doneCb = function(exitCode, _stdout, stderr)
+    if stderr and #stderr > 0 then
+      log.w("attemptModelStream: final stderr: " .. stderr:sub(1, 500))
+    end
+    -- Flush any remaining partial line
+    if #lineBuffer > 0 then
+      processLine(lineBuffer:gsub("\r$", ""))
+      lineBuffer = ""
+    end
+    log.d("attemptModelStream: done exitCode=" .. tostring(exitCode) .. " contentLen=" .. #fullContent)
+    if #fullContent > 0 then
+      onSuccess(fullContent, model.name, model.provider)
+    else
+      onFail(string.format("no content from model '%s' (id: %s) exitCode=%d",
+        model.name, modelId, exitCode))
+    end
+  end
+
+  local args = {
+    "-s", "-S", "-N",
+    "-X", "POST",
+    "-H", "Content-Type: application/json",
+    "-H", "Authorization: Bearer " .. provider.apiKey,
+    "-d", body,
+    url,
+  }
+
+  local task = hs.task.new("/usr/bin/curl", doneCb, streamCb, args)
+  task:start()
+  return function() task:terminate() end
+end
+
 --- Call the AI with a full model fallback chain.
 -- Tries the primary model first; on failure tries each fallback in order.
 -- Invokes callback(err, result):
@@ -116,6 +205,51 @@ function M.call(cfg, profile, messages, callback)
   end
 
   tryNext(nil)
+end
+
+--- Stream the AI with a full model fallback chain.
+-- onChunk(deltaText) is called for each streamed token.
+-- callback(err, fullContent, modelName, providerName) is called when the stream ends.
+-- Returns a cancel function.
+--@param cfg      table    Normalised config (from config.lua)
+--@param profile  string   modelSetProfile name (or nil → first profile)
+--@param messages table    Array of {role=string, content=string}
+--@param onChunk  function(deltaText: string)
+--@param callback function(err, content, modelName, providerName)
+--@return function  cancel()
+function M.callStream(cfg, profile, messages, onChunk, callback)
+  if not profile then
+    profile = cfg.modelSetProfiles[1].name
+  end
+
+  local chain = buildChain(cfg, profile)
+  local index = 1
+  local currentCancel = nil
+
+  local function tryNext(lastErr)
+    if index > #chain then
+      callback(lastErr or "all models failed", nil)
+      return
+    end
+    local modelId = chain[index]
+    index = index + 1
+    currentCancel = attemptModelStream(cfg, modelId, messages, onChunk,
+      function(content, modelName, providerName)
+        callback(nil, content, modelName, providerName)
+      end,
+      function(errMsg)
+        hs.logger.new("AgentMenu", "warning").w(
+          string.format("[AgentMenu] model id '%s' stream failed: %s — trying next", modelId, errMsg))
+        tryNext(errMsg)
+      end
+    )
+  end
+
+  tryNext(nil)
+
+  return function()
+    if currentCancel then currentCancel() end
+  end
 end
 
 return M
