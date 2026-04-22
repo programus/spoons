@@ -146,6 +146,37 @@ button {
 button:hover { opacity: 0.85; }
 ]]
 
+-- Minimal synchronous Markdown renderer (no external dependency)
+local MARKED_INLINE = [=[
+var marked=(function(){
+function e(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+function i(s){
+  s=s.replace(/`([^`]+)`/g,function(_,c){return"<code>"+e(c)+"</code>";});
+  s=s.replace(/\*\*\*(.+?)\*\*\*/g,"<strong><em>$1</em></strong>");
+  s=s.replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>");
+  s=s.replace(/\*(.+?)\*/g,"<em>$1</em>");
+  s=s.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2">$1</a>');
+  return s;
+}
+function p(src){
+  var lines=src.split("\n"),out="",j=0,inCode=false,buf="";
+  while(j<lines.length){
+    var l=lines[j];
+    if(!inCode&&/^```/.test(l)){inCode=true;buf="";j++;continue;}
+    if(inCode){if(/^```/.test(l)){out+="<pre><code>"+e(buf.replace(/\n$/,""))+"</code></pre>";inCode=false;buf="";}else{buf+=l+"\n";}j++;continue;}
+    var h=l.match(/^(#{1,6})\s+(.*)/);
+    if(h){out+="<h"+h[1].length+">"+i(h[2])+"</h"+h[1].length+">";j++;continue;}
+    if(/^[-*+]\s/.test(l)){out+="<ul>";while(j<lines.length&&/^[-*+]\s/.test(lines[j])){out+="<li>"+i(lines[j].slice(2))+"</li>";j++;}out+="</ul>";continue;}
+    if(/^\d+\.\s/.test(l)){out+="<ol>";while(j<lines.length&&/^\d+\.\s/.test(lines[j])){out+="<li>"+i(lines[j].replace(/^\d+\.\s/,""))+"</li>";j++;}out+="</ol>";continue;}
+    if(l.trim()===""){j++;continue;}
+    out+="<p>"+i(l)+"</p>";j++;
+  }
+  return out;
+}
+return {parse:p};
+})();
+]=]
+
 local function buildLoadingHtml(inputText)
   return string.format([[<!DOCTYPE html>
 <html>
@@ -164,21 +195,56 @@ body {
 #chat {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 16px;
+  padding: 8px 0;
   display: flex;
   flex-direction: column;
-  gap: 0;
 }
-.turn {
-  padding: 10px 14px;
+.turn-user {
+  background: var(--user-bg);
+  padding: 10px 16px;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  font-size: 13px;
 }
-.turn-ai   { background: var(--ai-bg); }
-.turn-user { background: var(--user-bg); font-size: 13px; }
+.turn-ai {
+  position: relative;
+  background: var(--ai-bg);
+  padding: 30px 16px 10px;
+}
+.turn-md { line-height: 1.6; word-break: break-word; }
+.turn-md h1,.turn-md h2,.turn-md h3 { margin: 0.8em 0 0.3em; }
+.turn-md p  { margin: 0.4em 0; }
+.turn-md ul,.turn-md ol { margin: 0.4em 0 0.4em 1.4em; }
+.turn-md li { margin: 0.15em 0; }
+.turn-md pre {
+  background: var(--pre-bg);
+  border-radius: 5px;
+  padding: 8px 12px;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.turn-md code { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+.turn-md p > code { background: var(--pre-bg); padding: 1px 4px; border-radius: 3px; }
+.turn-md a { color: var(--accent); }
+.copy-turn-btn {
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 3px 5px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.turn-ai:hover .copy-turn-btn { opacity: 0.55; }
+.copy-turn-btn:hover { opacity: 1 !important; background: var(--bg2); }
 #loading-row {
-  padding: 10px 14px;
+  padding: 10px 16px;
   background: var(--ai-bg);
   color: var(--text-dim);
   font-size: 15px;
@@ -245,71 +311,92 @@ body {
   <textarea id="followup-input" rows="1" placeholder="继续追问… (Cmd+Enter 发送)"></textarea>
   <button id="btn-send" onclick="sendFollowup()">发送</button>
 </div>
+<script>%s</script>
 <script>
-var streamDiv = null;
+var COPY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+var currentTurnDiv = null;
 
 function cancelAction() {
-  webkit.messageHandlers.agentMenuResult.postMessage({ action: "cancel" });
+  webkit.messageHandlers.agentMenuResult.postMessage({action:'cancel'});
 }
 
 function appendStreamChunk(text) {
-  var chat = document.getElementById("chat");
-  var loading = document.getElementById("loading-row");
+  var chat = document.getElementById('chat');
+  var loading = document.getElementById('loading-row');
   if (loading) {
     loading.remove();
-    streamDiv = document.createElement("div");
-    streamDiv.className = "turn turn-ai";
-    chat.appendChild(streamDiv);
+    currentTurnDiv = document.createElement('div');
+    currentTurnDiv.className = 'turn-ai';
+    currentTurnDiv.dataset.raw = '';
+    var inner = document.createElement('div');
+    inner.className = 'turn-md';
+    currentTurnDiv.appendChild(inner);
+    chat.appendChild(currentTurnDiv);
   }
-  if (streamDiv) {
-    streamDiv.textContent += text;
+  if (currentTurnDiv) {
+    currentTurnDiv.dataset.raw += text;
+    var inner = currentTurnDiv.querySelector('.turn-md');
+    if (inner) inner.textContent = currentTurnDiv.dataset.raw;
   }
   chat.scrollTop = chat.scrollHeight;
+}
+
+function finalizeCurrentTurn() {
+  if (!currentTurnDiv) return;
+  var raw = currentTurnDiv.dataset.raw;
+  var inner = currentTurnDiv.querySelector('.turn-md');
+  if (inner) {
+    inner.innerHTML = marked.parse(raw);
+  }
+  var btn = document.createElement('button');
+  btn.className = 'copy-turn-btn';
+  btn.title = '复制 Markdown 源码';
+  btn.innerHTML = COPY_SVG;
+  var rawCapture = raw;
+  btn.onclick = function(e) {
+    e.stopPropagation();
+    webkit.messageHandlers.agentMenuResult.postMessage({action:'copy', text:rawCapture});
+  };
+  currentTurnDiv.appendChild(btn);
+  currentTurnDiv = null;
 }
 
 function showFollowup() {
-  var area = document.getElementById("followup-area");
-  area.style.display = "flex";
-  document.getElementById("followup-input").focus();
+  finalizeCurrentTurn();
+  var area = document.getElementById('followup-area');
+  area.style.display = 'flex';
+  document.getElementById('followup-input').focus();
 }
 
 function sendFollowup() {
-  var ta = document.getElementById("followup-input");
+  var ta = document.getElementById('followup-input');
   var text = ta.value.trim();
   if (!text) return;
-  ta.value = "";
-  ta.style.height = "";
-  document.getElementById("btn-send").disabled = true;
-
-  // Append user turn
-  var chat = document.getElementById("chat");
-  var userDiv = document.createElement("div");
-  userDiv.className = "turn turn-user";
+  ta.value = '';
+  ta.style.height = '';
+  document.getElementById('btn-send').disabled = true;
+  var chat = document.getElementById('chat');
+  var userDiv = document.createElement('div');
+  userDiv.className = 'turn-user';
   userDiv.textContent = text;
   chat.appendChild(userDiv);
-
-  // Append new AI loading row
-  var loadDiv = document.createElement("div");
-  loadDiv.id = "loading-row";
-  loadDiv.className = "";
-  loadDiv.style.cssText = "padding:10px 14px;background:var(--ai-bg);color:var(--text-dim);font-size:15px;display:flex;align-items:center;gap:8px;";
+  var loadDiv = document.createElement('div');
+  loadDiv.id = 'loading-row';
   loadDiv.innerHTML = 'Thinking <span class="dot">●</span><span class="dot">●</span><span class="dot">●</span>';
+  loadDiv.style.cssText = 'padding:10px 16px;background:var(--ai-bg);color:var(--text-dim);font-size:15px;display:flex;align-items:center;gap:8px;';
   chat.appendChild(loadDiv);
-  streamDiv = null;
   chat.scrollTop = chat.scrollHeight;
-
-  webkit.messageHandlers.agentMenuResult.postMessage({ action: "followup", text: text });
+  webkit.messageHandlers.agentMenuResult.postMessage({action:'followup', text:text});
 }
 
-// Auto-grow textarea
-document.addEventListener("DOMContentLoaded", function() {
-  var ta = document.getElementById("followup-input");
-  ta.addEventListener("input", function() {
-    ta.style.height = "";
-    ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
+document.addEventListener('DOMContentLoaded', function() {
+  var ta = document.getElementById('followup-input');
+  ta.addEventListener('input', function() {
+    ta.style.height = '';
+    ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
   });
-  ta.addEventListener("keydown", function(e) {
-    if (e.key === "Enter" && e.metaKey) {
+  ta.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && e.metaKey) {
       e.preventDefault();
       sendFollowup();
     }
@@ -317,7 +404,7 @@ document.addEventListener("DOMContentLoaded", function() {
 });
 </script>
 </body>
-</html>]], TOOLBAR_CSS, inputPreviewHtml(inputText))
+</html>]], TOOLBAR_CSS, inputPreviewHtml(inputText), MARKED_INLINE)
 end
 
 --- Open the result dialog in "loading" state near the mouse.
