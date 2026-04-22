@@ -64,10 +64,12 @@ end
 -- Calls onShow(text, rect|nil) when a non-empty selection is detected.
 -- Calls onHide() when the selection is cleared or the user clicks/types.
 --
---@param onShow  function(text: string, rect: table|nil)
---@param onHide  function()
+--@param onShow       function(text: string, rect: table|nil)
+--@param onHide       function()
+--@param suppressHide function()|nil  optional; when it returns true, mouseDown is
+--                    delegated to the popup and selection resets its own state silently.
 --@return table  { start=fn, stop=fn }  — call :start() and :stop() to manage lifecycle
-function M.watchSelection(onShow, onHide)
+function M.watchSelection(onShow, onHide, suppressHide)
   local debounceTimer = nil
   local selectionVisible = false
 
@@ -86,10 +88,16 @@ function M.watchSelection(onShow, onHide)
     end
   end
 
-  -- After mouse release, wait briefly then check selection
+  -- After mouse release, wait briefly then check selection.
+  -- When the popup is active (suppressHide returns true), the mouse-up belongs
+  -- to a click inside the popup UI — skip the debounce entirely so we don't
+  -- re-check selection and accidentally dismiss the popup.
   local mouseUpTap = hs.eventtap.new(
     { hs.eventtap.event.types.leftMouseUp },
     function(_event)
+      if suppressHide and suppressHide() then
+        return false  -- popup owns this interaction; leave it alone
+      end
       cancelDebounce()
       debounceTimer = hs.timer.doAfter(DEBOUNCE_DELAY, function()
         debounceTimer = nil
@@ -118,10 +126,19 @@ function M.watchSelection(onShow, onHide)
     end
   )
 
-  -- Left mouse down (new click) clears the toolbar
+  -- Left mouse down (new click) clears the quick-menu / toolbar.
+  -- When the popup is active (suppressHide returns true), yield to popup's own
+  -- click handler and only reset our internal state — do NOT call onHide().
   local mouseDownTap = hs.eventtap.new(
     { hs.eventtap.event.types.leftMouseDown },
     function(_event)
+      if suppressHide and suppressHide() then
+        -- popup is handling this click; quietly reset our state so we don't
+        -- try to hide it again on the next unrelated click.
+        cancelDebounce()
+        selectionVisible = false
+        return false
+      end
       hideIfVisible()
       return false
     end

@@ -1,8 +1,11 @@
 --- === AgentMenu ===
 ---
---- AI Agent toolbar and hotkey menu for Hammerspoon.
+--- AI Agent quick-menu and hotkey chooser for Hammerspoon.
 --- Supports OpenAI-compatible APIs, configurable actions,
---- floating selection toolbar, and hotkey-triggered chooser.
+--- floating quick-menu on text selection, and hotkey-triggered chooser.
+---
+--- When text is selected a small dot appears near the selection.
+--- Hovering the dot expands it to a circular button; clicking opens a menu.
 ---
 --- Usage:
 ---   local cfg = require("agentmenu_config")   -- your config file
@@ -177,12 +180,16 @@ function obj:start()
     end)
 
     selectionWatcher = selection.watchSelection(
-      function(text, rect)
-        -- text is non-empty, show toolbar
+      function(_text, _rect)
+        -- text is non-empty; show quick-menu dot near current mouse position
         popup.show(toolbarActions, nil)
       end,
       function()
         popup.hide()
+      end,
+      function()
+        -- yield mouseDown to popup whenever it is active
+        return popup.isActive()
       end
     )
     selectionWatcher.start()

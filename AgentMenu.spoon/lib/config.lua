@@ -137,12 +137,13 @@ function M.loadConfig(raw)
     actionByName[act.name] = act
   end
 
-  -- ── toolbar ──────────────────────────────────────────────────────────────
-  local toolbar = raw.toolbar or {}
-  toolbar.actions = toolbar.actions or {}
-  for i, name in ipairs(toolbar.actions) do
+  -- ── quick-menu (accepts both "quick-menu" and legacy "toolbar") ──────────
+  -- "quick-menu" takes priority; "toolbar" is kept for backward compatibility.
+  local quickMenu = raw["quick-menu"] or raw.toolbar or {}
+  quickMenu.actions = quickMenu.actions or {}
+  for i, name in ipairs(quickMenu.actions) do
     if not actionByName[name] then
-      err(string.format("toolbar.actions[%d] '%s' not found in actions", i, name))
+      err(string.format("quick-menu.actions[%d] '%s' not found in actions", i, name))
     end
   end
 
@@ -166,7 +167,7 @@ function M.loadConfig(raw)
     modelSetProfiles = raw.modelSetProfiles,
     replaceFallback = replaceFallback,
     actions         = raw.actions,
-    toolbar         = toolbar,
+    toolbar         = quickMenu,  -- internal field; populated from "quick-menu" or legacy "toolbar"
     hotkey          = hotkey,
     -- Lookup tables for quick access
     _providerByName = providerByName,
