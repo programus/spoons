@@ -1,6 +1,6 @@
 # AgentMenu.spoon
 
-[中文说明](README.zh.md)
+[中文说明](README.zh.md) | [日本語](README.ja.md)
 
 An AI-powered quick-menu and hotkey chooser for macOS, built on Hammerspoon.  
 Select any text on screen and an action button appears instantly — click it to run AI on the selection.  
@@ -92,7 +92,7 @@ The UI language is set via `lang` in your config file:
 lang = "zh",  -- switch to Chinese
 ```
 
-Built-in languages: `"en"`, `"zh"`.
+Built-in languages: `"en"`, `"zh"`, `"ja"`.
 
 To add a new language, create `res/i18n/<lang>.lua` modelled on
 [`res/i18n/en.lua`](res/i18n/en.lua).
@@ -118,6 +118,7 @@ res/
   i18n/
     en.lua               — English UI strings
     zh.lua               — Chinese UI strings
+    ja.lua               — Japanese UI strings
 ```
 
 ## License

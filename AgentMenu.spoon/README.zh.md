@@ -1,6 +1,6 @@
 # AgentMenu.spoon
 
-[English](README.md)
+[English](README.md) | [日本語](README.ja.md)
 
 一个基于 Hammerspoon 的 macOS AI 快捷菜单与热键选择器。  
 在屏幕上选中任意文字，旁边会立即出现一个操作按钮 — 点击即可对选中内容执行 AI 操作。  
@@ -92,7 +92,7 @@ spoon.AgentMenu:configure(cfg):start()
 lang = "zh",  -- 切换为中文
 ```
 
-内置语言：`"en"`、`"zh"`。
+内置语言：`"en"`、`"zh"`、`"ja"`。
 
 如需添加新语言，在 `res/i18n/` 目录下创建 `<lang>.lua` 文件，参照
 [`res/i18n/en.lua`](res/i18n/en.lua) 的格式填写翻译即可。
@@ -117,8 +117,7 @@ res/
     param_dialog.html    — 参数输入对话框模板
   i18n/
     en.lua               — 英文界面字符串
-    zh.lua               — 中文界面字符串
-```
+    zh.lua               — 中文界面字符串      ja.lua               — 日文界面字符串```
 
 ## 许可证
 
