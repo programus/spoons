@@ -457,6 +457,12 @@ function M.showLoading(inputText, onCancel, onFollowup)
   dialogWebview:html(buildLoadingHtml(inputText))
   dialogWebview:show()
   dialogWebview:bringToFront(false)
+  hs.timer.doAfter(0.1, function()
+    if dialogWebview then
+      local win = dialogWebview:hswindow()
+      if win then win:focus() end
+    end
+  end)
 end
 
 --- Close the loading dialog without triggering the cancel callback.
@@ -566,6 +572,12 @@ function M.show(text, mode, replaceFallback, selectedText, inputText, modelName,
       dialogWebview:html(buildLoadingHtml(inputText))
       dialogWebview:show()
       dialogWebview:bringToFront(false)
+      hs.timer.doAfter(0.05, function()
+        if dialogWebview then
+          local win = dialogWebview:hswindow()
+          if win then win:focus() end
+        end
+      end)
       -- Inject text after a short delay so the page has initialised
       hs.timer.doAfter(0.15, function()
         if not dialogWebview then return end
