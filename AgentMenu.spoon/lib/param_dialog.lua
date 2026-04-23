@@ -64,53 +64,30 @@ function M.show(paramDefs, cb)
 
   callback = cb
 
-  -- Build form rows HTML
-  local rows = {}
+  -- Build param definitions as JSON for the HTML template
+  local paramDefsForJs = {}
   for _, p in ipairs(userParams) do
-    local defVal = (p.default or ""):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub('"', "&quot;")
-    local label  = (p.label or p.name):gsub("&", "&amp;"):gsub("<", "&lt;")
+    local def = {
+      name    = p.name,
+      label   = p.label or p.name,
+      default = p.default or "",
+    }
     if p.options and #p.options > 0 then
-      -- Custom combobox: text input + dropdown button
-      local optItems = {}
-      for _, opt in ipairs(p.options) do
-        local esc = opt:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub('"', "&quot;"):gsub("'", "&#39;")
-        optItems[#optItems + 1] = string.format(
-          '<div class="cb-option" onclick="cbSelect(\'param_%s\',\'%s\')">%s</div>',
-          p.name, esc, esc)
-      end
-      rows[#rows + 1] = string.format([[
-      <div class="row">
-        <label for="param_%s">%s</label>
-        <div class="cb-wrap">
-          <input type="text" id="param_%s" name="%s" value="%s" autocomplete="off" />
-          <button type="button" class="cb-arrow" onclick="cbToggle('param_%s')">&#9660;</button>
-          <div class="cb-dropdown" id="drop_param_%s">%s</div>
-        </div>
-      </div>]], p.name, label, p.name, p.name, defVal,
-               p.name, p.name, table.concat(optItems))
-    else
-      rows[#rows + 1] = string.format([[
-      <div class="row">
-        <label for="param_%s">%s</label>
-        <input type="text" id="param_%s" name="%s" value="%s" autocomplete="off" />
-      </div>]], p.name, label, p.name, p.name, defVal)
+      def.options = p.options
     end
-  end
-
-  -- Serialise param names to JS for form collection
-  local nameList = {}
-  for _, p in ipairs(userParams) do
-    nameList[#nameList + 1] = string.format('"%s"', p.name)
+    paramDefsForJs[#paramDefsForJs + 1] = def
   end
 
   local html = templates.load("param_dialog.html", {
-    FORM_ROWS   = table.concat(rows, "\n"),
-    PARAM_NAMES = table.concat(nameList, ", "),
+    PARAM_DEFS_JSON = hs.json.encode(paramDefsForJs),
   })
 
-  -- Create webview
-  local rowH  = 66   -- label + input + gap
-  local h     = math.max(140, 20 + #userParams * rowH + 50)
+  -- Compute window height (textarea rows ~82px, combobox rows ~50px)
+  local totalRowH = 0
+  for _, p in ipairs(userParams) do
+    totalRowH = totalRowH + ((p.options and #p.options > 0) and 50 or 82)
+  end
+  local h = math.max(140, 20 + totalRowH + 50)
   local w     = 400
   local mp     = hs.mouse.absolutePosition()
   local screen = hs.screen.mainScreen():frame()

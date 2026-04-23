@@ -49,8 +49,8 @@ body {
 .row { display: flex; flex-direction: column; gap: 4px; }
 label { font-size: 12px; color: var(--text-dim); }
 
-/* ── Text input ─────────────────────────────────────────────────────────── */
-input[type=text] {
+/* ── Text input / textarea ──────────────────────────────────────────────── */
+input[type=text], textarea {
   width: 100%;
   padding: 6px 8px;
   background: var(--bg2);
@@ -59,8 +59,16 @@ input[type=text] {
   color: var(--text);
   font-size: 13px;
   outline: none;
+  font-family: inherit;
 }
-input[type=text]:focus { border-color: var(--accent); }
+input[type=text]:focus, textarea:focus { border-color: var(--accent); }
+textarea {
+  resize: none;
+  min-height: 60px;
+  max-height: 200px;
+  overflow-y: auto;
+  line-height: 1.4;
+}
 
 /* ── Buttons ────────────────────────────────────────────────────────────── */
 .buttons {
@@ -124,7 +132,28 @@ button:hover { opacity: 0.85; }
 </head>
 <body>
 
-{{FORM_ROWS}}
+<!-- ── Form rows will be injected here by JS ──────────────────────────────── -->
+<div id="form-rows"></div>
+
+<!-- ── Row template: plain textarea ────────────────────────────────────────── -->
+<template id="tmpl-text">
+  <div class="row">
+    <label></label>
+    <textarea autocomplete="off" rows="2"></textarea>
+  </div>
+</template>
+
+<!-- ── Row template: combobox ───────────────────────────────────────────────── -->
+<template id="tmpl-combo">
+  <div class="row">
+    <label></label>
+    <div class="cb-wrap">
+      <input type="text" autocomplete="off" />
+      <button type="button" class="cb-arrow">&#9660;</button>
+      <div class="cb-dropdown"></div>
+    </div>
+  </div>
+</template>
 
 <div class="buttons">
   <button id="btn-cancel" onclick="cancel()">{{PARAM_CANCEL_LABEL}}</button>
@@ -132,13 +161,60 @@ button:hover { opacity: 0.85; }
 </div>
 
 <script>
-var names = [{{PARAM_NAMES}}];
+var defs = {{PARAM_DEFS_JSON}};
 
+// ── Build form rows from defs ────────────────────────────────────────────────
+(function() {
+  var container = document.getElementById("form-rows");
+  defs.forEach(function(p) {
+    var isCombo = Array.isArray(p.options) && p.options.length > 0;
+    var frag = document.importNode(
+      document.getElementById(isCombo ? "tmpl-combo" : "tmpl-text").content, true);
+
+    var label = frag.querySelector("label");
+    label.textContent = p.label || p.name;
+    label.setAttribute("for", "param_" + p.name);
+
+    if (isCombo) {
+      var input = frag.querySelector("input[type=text]");
+      input.id    = "param_" + p.name;
+      input.name  = p.name;
+      input.value = p.default || "";
+
+      frag.querySelector(".cb-arrow").addEventListener("click", function() {
+        cbToggle("param_" + p.name);
+      });
+
+      var drop = frag.querySelector(".cb-dropdown");
+      drop.id = "drop_param_" + p.name;
+      p.options.forEach(function(opt) {
+        var div = document.createElement("div");
+        div.className   = "cb-option";
+        div.textContent = opt;
+        div.addEventListener("click", function() { cbSelect("param_" + p.name, opt); });
+        drop.appendChild(div);
+      });
+    } else {
+      var ta = frag.querySelector("textarea");
+      ta.id    = "param_" + p.name;
+      ta.name  = p.name;
+      ta.value = p.default || "";
+      ta.addEventListener("input", function() {
+        ta.style.height = "";
+        ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+      });
+    }
+
+    container.appendChild(frag);
+  });
+})();
+
+// ── Form actions ─────────────────────────────────────────────────────────────
 function collect() {
   var vals = {};
-  names.forEach(function(n) {
-    var el = document.getElementById("param_" + n);
-    vals[n] = el ? el.value : "";
+  defs.forEach(function(p) {
+    var el = document.getElementById("param_" + p.name);
+    vals[p.name] = el ? el.value : "";
   });
   return vals;
 }
@@ -149,17 +225,17 @@ function cancel() {
   webkit.messageHandlers.agentMenuParams.postMessage({ action: "cancel" });
 }
 document.addEventListener("keydown", function(e) {
-  if (e.key === "Enter")  { submit(); }
+  if (e.key === "Enter" && e.metaKey) { e.preventDefault(); submit(); }
   if (e.key === "Escape") { cancel(); }
 });
 
-// Focus first input on load
-window.onload = function() {
-  var first = document.querySelector("input[type=text]");
+// Focus first field after rows are built
+window.addEventListener("load", function() {
+  var first = document.querySelector("#form-rows textarea, #form-rows input[type=text]");
   if (first) first.focus();
-};
+});
 
-// ── Combobox helpers ───────────────────────────────────────────────────────
+// ── Combobox helpers ─────────────────────────────────────────────────────────
 function cbToggle(inputId) {
   var drop = document.getElementById("drop_" + inputId);
   if (!drop) return;
