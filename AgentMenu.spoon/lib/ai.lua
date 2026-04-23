@@ -234,11 +234,23 @@ function M.callStream(cfg, profile, messages, onChunk, callback)
     end
     local modelId = chain[index]
     index = index + 1
-    currentCancel = attemptModelStream(cfg, modelId, messages, onChunk,
+    -- Guard flag: prevents stale callbacks from a failed attempt reaching the
+    -- caller after tryNext() has already moved on to the next model.
+    -- This handles a race where hs.task streamCb chunks are still queued on
+    -- the main run-loop when doneCb fires with empty content and triggers
+    -- fallback — those late chunks must not be forwarded as duplicate output.
+    local attemptActive = true
+    currentCancel = attemptModelStream(cfg, modelId, messages,
+      function(chunk)
+        if attemptActive then onChunk(chunk) end
+      end,
       function(content, modelName, providerName)
-        callback(nil, content, modelName, providerName)
+        if attemptActive then
+          callback(nil, content, modelName, providerName)
+        end
       end,
       function(errMsg)
+        attemptActive = false   -- discard any late streamCb chunks for this attempt
         hs.logger.new("AgentMenu", "warning").w(
           string.format("[AgentMenu] model id '%s' stream failed: %s — trying next", modelId, errMsg))
         tryNext(errMsg)
