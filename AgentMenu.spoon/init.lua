@@ -45,6 +45,7 @@ local selection
 local popup
 local paramDialog
 local resultUI
+local templates
 
 local function loadLibs()
   configLib   = req("config")
@@ -54,6 +55,7 @@ local function loadLibs()
   popup       = req("popup")
   paramDialog = req("param_dialog")
   resultUI    = req("result_ui")
+  templates   = req("templates")
 end
 
 -- ── Core action runner ─────────────────────────────────────────────────────
@@ -172,6 +174,9 @@ end
 function obj:configure(rawConfig)
   loadLibs()
   cfg = configLib.loadConfig(rawConfig)
+  templates.setLang(cfg.lang)
+  resultUI.setTemplates(templates)
+  paramDialog.setTemplates(templates)
   return self
 end
 

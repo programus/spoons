@@ -160,6 +160,11 @@ function M.loadConfig(raw)
     end
   end
 
+  -- ── lang (optional) ──────────────────────────────────────────────────────
+  -- ISO 639-1 language code for UI strings.  Defaults to "en".
+  -- Supported: "en", "zh".  Add res/i18n/<lang>.lua to support more languages.
+  local lang = raw.lang or "en"
+
   -- ── Return normalised config ─────────────────────────────────────────────
   return {
     providers       = raw.providers,
@@ -167,6 +172,7 @@ function M.loadConfig(raw)
     modelSetProfiles = raw.modelSetProfiles,
     replaceFallback = replaceFallback,
     actions         = raw.actions,
+    lang            = lang,
     toolbar         = quickMenu,  -- internal field; populated from "quick-menu" or legacy "toolbar"
     hotkey          = hotkey,
     -- Lookup tables for quick access
