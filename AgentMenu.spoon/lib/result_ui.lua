@@ -456,7 +456,7 @@ function M.showLoading(inputText, onCancel, onFollowup)
   end)
   dialogWebview:html(buildLoadingHtml(inputText))
   dialogWebview:show()
-  dialogWebview:bringToFront(true)
+  dialogWebview:bringToFront(false)
 end
 
 --- Close the loading dialog without triggering the cancel callback.
@@ -565,7 +565,7 @@ function M.show(text, mode, replaceFallback, selectedText, inputText, modelName,
       -- Load the standard loading HTML then immediately inject the AI turn
       dialogWebview:html(buildLoadingHtml(inputText))
       dialogWebview:show()
-      dialogWebview:bringToFront(true)
+      dialogWebview:bringToFront(false)
       -- Inject text after a short delay so the page has initialised
       hs.timer.doAfter(0.15, function()
         if not dialogWebview then return end
