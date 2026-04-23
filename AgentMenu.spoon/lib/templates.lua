@@ -20,7 +20,8 @@ local hs = hs
 local M = {}
 
 -- Derive the spoon root from this file's own path (lib/ → parent).
-local _srcFile   = debug.getinfo(1, "S").source:match("^@(.+)$") or ""
+local _srcFile   = (debug.getinfo(1, "S") or {}).source or ""
+_srcFile         = _srcFile:match("^@(.+)$") or ""
 local _srcDir    = _srcFile:match("^(.+)/[^/]+$") or "."
 local _spoonPath = _srcDir:match("^(.+)/lib$") or _srcDir   -- strip trailing /lib
 

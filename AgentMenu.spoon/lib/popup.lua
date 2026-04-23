@@ -53,15 +53,24 @@ local function makeColors()
 end
 
 -- ── Module state ─────────────────────────────────────────────────────────
+---@type string|nil
 local currentState   = nil   -- "dot" | "button" | "menu"
+---@type {x: number, y: number}|nil
 local dotCenter      = nil   -- {x, y} anchor shared by all canvases
+---@type table|nil
 local dotCanvas      = nil
+---@type table|nil
 local btnCanvas      = nil
+---@type table|nil
 local menuCanvas     = nil
+---@type table|nil
 local hoverTap       = nil   -- mouseMoved → dot ↔ button transitions
+---@type table|nil
 local clickTap       = nil   -- mouseDown  → button click + outside dismiss
+---@type function|nil
 local onActionCb     = nil
 local currentActions = {}
+---@type {dot: table, btn: table, btn_icon: table, menu_bg: table, item_hover: table, item_text: table, border: table}|nil
 local colors_        = nil   -- cached colour table
 local menuItemRects  = {}    -- action name → absolute screen rect
 
@@ -108,6 +117,7 @@ end
 
 -- ── Canvas builders ───────────────────────────────────────────────────────
 local function buildDotCanvas(center)
+  assert(colors_)
   local hd = DOT_AREA_D   -- canvas size (hover area)
   local d  = DOT_D        -- visible dot size
   local c  = hs.canvas.new({ x=center.x-hd/2, y=center.y-hd/2, w=hd, h=hd })
@@ -124,6 +134,7 @@ local function buildDotCanvas(center)
 end
 
 local function buildButtonCanvas(center)
+  assert(colors_)
   local d = BTN_D
   local c = hs.canvas.new({ x=center.x-d/2, y=center.y-d/2, w=d, h=d })
   c:level(hs.canvas.windowLevels.floating)
@@ -146,6 +157,8 @@ local function buildButtonCanvas(center)
 end
 
 local function buildMenuCanvas(center, actions)
+  assert(colors_)
+  local colors = colors_   -- capture non-nil ref for use inside callbacks
   local maxLabelW = MENU_MIN_W - MENU_H_PAD * 2
   for _, act in ipairs(actions) do
     local w = measureLabel(act.label)
@@ -158,6 +171,7 @@ local function buildMenuCanvas(center, actions)
   -- Position below button by default; flip above if no room
   local screen = hs.screen.mainScreen():frame()
   local mx = center.x - menuW / 2
+  ---@type number
   local my = center.y + BTN_D/2 + MENU_GAP
   if my + menuH > screen.y + screen.h then
     my = center.y - BTN_D/2 - MENU_GAP - menuH
@@ -172,14 +186,14 @@ local function buildMenuCanvas(center, actions)
 
   -- Background
   c:appendElements({
-    type="rectangle", action="fill", fillColor=colors_.menu_bg,
+    type="rectangle", action="fill", fillColor=colors.menu_bg,
     roundedRectRadii={xRadius=CORNER_R, yRadius=CORNER_R},
     frame={x=0, y=0, w=menuW, h=menuH},
   })
   -- Border
   c:appendElements({
     type="rectangle", action="stroke",
-    strokeColor=colors_.border, strokeWidth=0.5,
+    strokeColor=colors.border, strokeWidth=0.5,
     roundedRectRadii={xRadius=CORNER_R, yRadius=CORNER_R},
     frame={x=0.5, y=0.5, w=menuW-1, h=menuH-1},
   })
@@ -207,7 +221,7 @@ local function buildMenuCanvas(center, actions)
     c:appendElements({
       type="text", text=act.label,
       textFont="Helvetica", textSize=FONT_SIZE,
-      textColor=colors_.item_text, textAlignment="left",
+      textColor=colors.item_text, textAlignment="left",
       frame={x=MENU_H_PAD, y=iy+(MENU_ITEM_H-FONT_SIZE-4)/2,
              w=menuW-MENU_H_PAD*2, h=FONT_SIZE+6},
     })
@@ -219,7 +233,7 @@ local function buildMenuCanvas(center, actions)
     for name, idx in pairs(bgIdxByName) do
       if idx == id then
         if msg == "mouseEnter" then
-          c:elementAttribute(id, "fillColor", colors_.item_hover)
+          c:elementAttribute(id, "fillColor", colors.item_hover)
         elseif msg == "mouseExit" then
           c:elementAttribute(id, "fillColor", {red=0, green=0, blue=0, alpha=0})
         end

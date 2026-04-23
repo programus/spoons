@@ -224,6 +224,7 @@ function M.callStream(cfg, profile, messages, onChunk, callback)
 
   local chain = buildChain(cfg, profile)
   local index = 1
+  ---@type function|nil
   local currentCancel = nil
 
   local function tryNext(lastErr)

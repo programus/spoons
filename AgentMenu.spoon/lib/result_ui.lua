@@ -6,6 +6,7 @@ local hs = hs
 local M = {}
 
 -- Injected by init.lua after spoon configuration.
+---@type any
 local templates = nil
 
 --- Inject the templates module (called from init.lua after configure()).
@@ -15,10 +16,13 @@ function M.setTemplates(t)
 end
 
 -- ── Dialog window state ──────────────────────────────────────────────────
+---@type table|nil
 local dialogWebview     = nil
 local dialogUserContent = nil
 local dialogIsLoading   = false   -- true while waiting for AI response
+---@type function|nil
 local dialogCancelFn    = nil     -- called when user closes/cancels during loading
+---@type function|nil
 local dialogFollowupCb  = nil     -- function(userText, messages) → called when user submits follow-up
 local dialogMessages    = {}      -- conversation history: {role, content}[]
 
@@ -26,7 +30,9 @@ local dialogMessages    = {}      -- conversation history: {role, content}[]
 local function rectNearMouse(w, h)
   local mp     = hs.mouse.absolutePosition()
   local screen = hs.screen.mainScreen():frame()
+  ---@type number
   local x = mp.x + 20
+  ---@type number
   local y = mp.y + 20
   if x + w > screen.x + screen.w then x = mp.x - w - 10 end
   if y + h > screen.y + screen.h then y = mp.y - h - 10 end

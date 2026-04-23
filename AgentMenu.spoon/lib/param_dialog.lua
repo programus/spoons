@@ -8,6 +8,7 @@ local log = hs.logger.new("AgentMenu.dialog", "debug")
 local M = {}
 
 -- Injected by init.lua after spoon configuration.
+---@type any
 local templates = nil
 
 --- Inject the templates module (called from init.lua after configure()).
@@ -18,8 +19,11 @@ end
 
 local BUILTIN_NAMES = { selection = true, clipboard = true }
 
+---@type table|nil
 local webview    = nil
+---@type table|nil
 local usercontent = nil
+---@type function|nil
 local callback   = nil
 
 local function closeDialog()
@@ -91,7 +95,9 @@ function M.show(paramDefs, cb)
   local w     = 400
   local mp     = hs.mouse.absolutePosition()
   local screen = hs.screen.mainScreen():frame()
+  ---@type number
   local x = mp.x + 20
+  ---@type number
   local y = mp.y + 20
   if x + w > screen.x + screen.w then x = mp.x - w - 10 end
   if y + h > screen.y + screen.h then y = mp.y - h - 10 end

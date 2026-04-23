@@ -32,19 +32,31 @@ local function req(name)
 end
 
 -- ── Private state ──────────────────────────────────────────────────────────
+---@type any
 local cfg          = nil   -- normalised config
+---@type table|nil
 local selectionWatcher = nil
+---@type table|nil
 local hotkey       = nil
+---@type table|nil
 local chooser      = nil
 
 -- Lazy-load lib modules after spoon path is known
+---@type any
 local configLib
+---@type any
 local utils
+---@type any
 local ai
+---@type any
 local selection
+---@type any
 local popup
+---@type any
 local paramDialog
+---@type any
 local resultUI
+---@type any
 local templates
 
 local function loadLibs()
@@ -143,6 +155,7 @@ local function runAction(actionName, selectedText)
 
     -- 6. Open dialog in loading state near mouse; Cancel button aborts the response
     local cancelled_ref = { false }
+    ---@type {fn: (function|nil)}
     local cancelHandle  = { fn = nil }
 
     local function onFollowup(userText)

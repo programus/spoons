@@ -70,6 +70,7 @@ end
 --                    delegated to the popup and selection resets its own state silently.
 --@return table  { start=fn, stop=fn }  — call :start() and :stop() to manage lifecycle
 function M.watchSelection(onShow, onHide, suppressHide)
+  ---@type table|nil
   local debounceTimer = nil
   local selectionVisible = false
 

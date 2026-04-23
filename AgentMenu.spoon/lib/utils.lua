@@ -69,7 +69,9 @@ end
 function M.clampToScreen(rect)
   local screen = hs.screen.mainScreen()
   local sf = screen:frame()
+  ---@type number
   local x = math.max(sf.x, math.min(rect.x, sf.x + sf.w - rect.w))
+  ---@type number
   local y = math.max(sf.y, math.min(rect.y, sf.y + sf.h - rect.h))
   return { x = x, y = y, w = rect.w, h = rect.h }
 end
