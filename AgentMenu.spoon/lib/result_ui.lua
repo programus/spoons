@@ -299,7 +299,7 @@ body {
 <body>
 <div id="toolbar">
   %s
-  <button id="btn-cancel" onclick="cancelAction()">Cancel</button>
+  <button id="btn-cancel" onclick="cancelAction()">Close</button>
 </div>
 <div id="chat">
   <div id="loading-row">
