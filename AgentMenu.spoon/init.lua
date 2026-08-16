@@ -40,6 +40,8 @@ local selectionWatcher = nil
 local hotkey       = nil
 ---@type table|nil
 local chooser      = nil
+---@type string|nil
+local capturedSelection = nil   -- selection captured before the chooser took focus
 
 -- Lazy-load lib modules after spoon path is known
 ---@type any
@@ -55,19 +57,22 @@ local popup
 ---@type any
 local paramDialog
 ---@type any
+local paramChooser
+---@type any
 local resultUI
 ---@type any
 local templates
 
 local function loadLibs()
-  configLib   = req("config")
-  utils       = req("utils")
-  ai          = req("ai")
-  selection   = req("selection")
-  popup       = req("popup")
-  paramDialog = req("param_dialog")
-  resultUI    = req("result_ui")
-  templates   = req("templates")
+  configLib    = req("config")
+  utils        = req("utils")
+  ai           = req("ai")
+  selection    = req("selection")
+  popup        = req("popup")
+  paramDialog  = req("param_dialog")
+  paramChooser = req("param_chooser")
+  resultUI     = req("result_ui")
+  templates    = req("templates")
 end
 
 -- ── Core action runner ─────────────────────────────────────────────────────
@@ -85,62 +90,82 @@ local function runAction(actionName, selectedText)
     return
   end
 
-  -- 1. Resolve built-in params
-  local builtins = {
-    selection = selectedText and selectedText ~= "" and selectedText or nil,
-    clipboard = hs.pasteboard.getContents(),
-  }
+  -- 1. Resolve built-in params.  The clipboard is only read when this action's
+  --    prompt actually references it — reading it copies the whole pasteboard.
+  local sel  = (selectedText and selectedText ~= "") and selectedText or nil
+  local clip = act._usesClipboard and hs.pasteboard.getContents() or nil
+  local builtins = { selection = sel, clipboard = clip }
 
-  -- 2. Filter out built-in params from user-defined parameters (they need dialog)
-  local userParams = {}
-  for _, p in ipairs(act.parameters) do
-    if not (p.isBuiltin or utils.BUILTINS[p.name]) then
-      userParams[#userParams + 1] = p
-    end
-  end
+  -- 2. Ask for the user-defined parameters.  Native chooser by default; the
+  --    HTML form only for actions that declare a multiline parameter, since
+  --    Hammerspoon has no native multi-line text input.
+  local paramUI     = act._hasMultilineParam and paramDialog or paramChooser
+  local paramUIName = act._hasMultilineParam and "param_dialog" or "param_chooser"
+  log.d("runAction: collecting params via " .. paramUIName)
 
-  -- 3. Show param dialog (skipped when userParams is empty)
-  log.d("runAction: showing param dialog, userParams count=" .. #userParams)
-  paramDialog.show(userParams, function(dialogErr, userValues)
+  paramUI.show(act.parameters, function(dialogErr, userValues)
     if dialogErr == "cancelled" then
-      log.d("runAction: param dialog cancelled")
+      log.d("runAction: param input cancelled")
       return
     end
 
-    -- 4. Merge: builtins + user-entered values (user wins on conflict)
+    -- 3. Merge: builtins + user-entered values (user wins on conflict)
     local allParams = utils.merge(builtins, userValues or {})
 
-    -- Resolve the display text shown in the toolbar (selection > clipboard > "")
-    local inputText = builtins.selection or builtins.clipboard or ""
+    -- Text shown in the result window's toolbar
+    local inputText = sel or clip or ""
 
-    -- 5. Fill template
+    -- 4. Fill template
     local prompt = utils.fillTemplate(act.prompt, allParams)
     log.d("runAction: filled prompt (" .. #prompt .. " chars): " .. prompt:sub(1, 200))
 
     -- Conversation history accumulates across follow-ups
     local messages = { { role = "user", content = prompt } }
 
-    -- ── Streaming AI call (used for initial call and each follow-up) ──────
-    local function callAI(cancelled_ref, cancelHandle)
+    -- 5. Claim the result window for this request.  Every later call carries
+    --    the token, so a superseded or cancelled request can never paint into
+    --    the window that now belongs to a newer one.
+    local token = resultUI.newRun()
+
+    -- Cancellation: `activeFlag` always points at the in-flight attempt's flag,
+    -- while each attempt's callbacks close over their own copy.
+    local activeFlag   = { false }
+    ---@type function|nil
+    local activeCancel = nil
+
+    local function onCancel()
+      log.d("runAction: cancelled by user")
+      activeFlag[1] = true
+      if activeCancel then activeCancel() end
+    end
+
+    -- ── Streaming AI call (used for the initial call, follow-ups and retries) ──
+    local function callAI()
       log.d("runAction: calling AI (stream), profile='" .. tostring(act.modelSetProfile) .. "'")
-      cancelHandle.fn = ai.callStream(cfg, act.modelSetProfile, messages,
+      local flag = { false }
+      activeFlag = flag
+      activeCancel = ai.callStream(cfg, act.modelSetProfile, messages,
         function(chunkText)
-          if not cancelled_ref[1] then
-            resultUI.appendChunk(chunkText)
+          if not flag[1] then
+            resultUI.appendChunk(token, chunkText)
           end
         end,
-        function(aiErr, result, modelName, providerName)
-          if cancelled_ref[1] then return end
+        function(aiErr, result, modelName, providerName, warning)
+          if flag[1] then return end
           if aiErr then
+            -- Keep the window and the conversation; offer a retry.  Destroying
+            -- the window here (as this used to) looked exactly like "the result
+            -- never showed up".
             log.e("runAction: AI error: " .. tostring(aiErr))
-            resultUI.hideLoading()
-            hs.alert.show("[AgentMenu] " .. aiErr)
+            resultUI.showError(token,
+              templates.t("ERROR_PREFIX") .. ": " .. tostring(aiErr), true)
             return
           end
           log.d("runAction: AI success, result " .. tostring(result and #result .. " chars" or "nil"))
           -- Append assistant turn to conversation history
           messages[#messages + 1] = { role = "assistant", content = result }
           resultUI.show(
+            token,
             result,
             act.outputMode,
             act.replaceFallback or cfg.replaceFallback,
@@ -149,33 +174,40 @@ local function runAction(actionName, selectedText)
             modelName,
             providerName
           )
+          if warning and warning.kind == "incomplete" then
+            resultUI.showError(token,
+              templates.t("INCOMPLETE_WARNING") .. " (" .. tostring(warning.detail) .. ")", false)
+          end
         end
       )
     end
-
-    -- 6. Open dialog in loading state near mouse; Cancel button aborts the response
-    local cancelled_ref = { false }
-    ---@type {fn: (function|nil)}
-    local cancelHandle  = { fn = nil }
 
     local function onFollowup(userText)
       if not userText or userText == "" then return end
       log.d("runAction: follow-up: " .. userText)
       messages[#messages + 1] = { role = "user", content = userText }
-      cancelled_ref = { false }
-      cancelHandle  = { fn = nil }
-      resultUI.startFollowupLoading()
-      callAI(cancelled_ref, cancelHandle)
+      -- The JS side already added the loading row when Send was clicked.
+      resultUI.startFollowupLoading(token, onCancel, false)
+      callAI()
     end
 
-    resultUI.showLoading(inputText, function()
-      log.d("runAction: cancelled by user")
-      cancelled_ref[1] = true
-      if cancelHandle.fn then cancelHandle.fn() end
-    end, onFollowup)
+    local function onRetry()
+      -- Nothing was appended to `messages` on failure, so the same request can
+      -- simply be sent again.
+      log.d("runAction: retry requested")
+      resultUI.startFollowupLoading(token, onCancel, true)
+      callAI()
+    end
+
+    -- 6. Open the dialog in loading state near the mouse
+    resultUI.showLoading(token, inputText, {
+      onCancel   = onCancel,
+      onFollowup = onFollowup,
+      onRetry    = onRetry,
+    })
 
     -- 7. Initial AI call
-    callAI(cancelled_ref, cancelHandle)
+    callAI()
   end)
 end
 
@@ -190,6 +222,7 @@ function obj:configure(rawConfig)
   templates.setLang(cfg.lang)
   resultUI.setTemplates(templates)
   paramDialog.setTemplates(templates)
+  paramChooser.setTemplates(templates)
   return self
 end
 
@@ -198,6 +231,21 @@ end
 function obj:start()
   if not cfg then
     error("[AgentMenu] call :configure(config) before :start()")
+  end
+
+  -- ── Accessibility messaging timeout ───────────────────────────────────
+  -- Default is 6s; an unresponsive app would block the main thread for that
+  -- long on every selection read.
+  selection.setAxTimeout(cfg.axTimeout)
+
+  -- ── Pre-warm the result window ────────────────────────────────────────
+  -- Deferred so it never slows down Hammerspoon's config load.  This is both a
+  -- speed-up (no WKWebView cold start per invocation) and the reason streamed
+  -- output can no longer race the page load.
+  if cfg.preloadWebview then
+    hs.timer.doAfter(2, function()
+      if cfg then resultUI.preload() end
+    end)
   end
 
   -- ── Floating toolbar (selection watcher) ──────────────────────────────
@@ -217,8 +265,10 @@ function obj:start()
     end)
 
     selectionWatcher = selection.watchSelection(
-      function(_text, _rect)
-        -- text is non-empty; show quick-menu dot near current mouse position
+      function(_text, _getRect)
+        -- text is non-empty; show quick-menu dot near current mouse position.
+        -- _getRect resolves the selection bounds on demand — deliberately not
+        -- called: it is the most expensive Accessibility query available.
         popup.show(toolbarActions, nil)
       end,
       function()
@@ -245,25 +295,19 @@ function obj:start()
     end
 
     if #hotkeyActions > 0 then
+      -- One instance, built once.  The selection is captured by the hotkey
+      -- handler (before the chooser takes focus) and read back here.
       chooser = hs.chooser.new(function(choice)
+        local text = capturedSelection
+        capturedSelection = nil
         if not choice then return end
-        local text = selection.getSelectedText()
         runAction(choice.subText, text)
       end)
       chooser:choices(hotkeyActions)
-      chooser:placeholderText("Select an action…")
+      chooser:placeholderText(templates.t("CHOOSER_PLACEHOLDER"))
 
       hotkey = hs.hotkey.bind(hkCfg.mods, hkCfg.key, function()
-        -- Capture selection before chooser steals focus
-        local text = selection.getSelectedText()
-        chooser:choices(hotkeyActions)
-        -- Override callback to close with captured selection
-        chooser = hs.chooser.new(function(choice)
-          if not choice then return end
-          runAction(choice.subText, text)
-        end)
-        chooser:choices(hotkeyActions)
-        chooser:placeholderText("Select an action…")
+        capturedSelection = selection.getSelectedText()
         chooser:show()
       end)
     end
@@ -287,10 +331,10 @@ function obj:stop()
     chooser:delete()
     chooser = nil
   end
-  if popup then popup.hide() end
-  if resultUI then
-    resultUI.hideLoading()
-  end
+  capturedSelection = nil
+  if popup then popup.destroy() end
+  if paramChooser then paramChooser.destroy() end
+  if resultUI then resultUI.destroy() end
   return self
 end
 
@@ -304,20 +348,26 @@ function obj:bindHotkeys(mapping)
     if hotkey then hotkey:delete() end
     local hkCfg = cfg and cfg.hotkey
     if hkCfg then
-      local captured = nil
+      -- Build the chooser once.  Creating one inside the hotkey handler leaked a
+      -- panel per keypress and left stop() only able to release the last one.
+      local acts = {}
+      for _, name in ipairs(hkCfg.actions or {}) do
+        local act = cfg._actionByName[name]
+        if act then acts[#acts + 1] = { text = act.label, subText = act.name } end
+      end
+      if chooser then chooser:delete() end
+      chooser = hs.chooser.new(function(choice)
+        local text = capturedSelection
+        capturedSelection = nil
+        if not choice then return end
+        runAction(choice.subText, text)
+      end)
+      chooser:choices(acts)
+      chooser:placeholderText(templates.t("CHOOSER_PLACEHOLDER"))
+
       hotkey = hs.hotkey.bind(mods, key, function()
-        captured = selection.getSelectedText()
-        local acts = {}
-        for _, name in ipairs(hkCfg.actions or {}) do
-          local act = cfg._actionByName[name]
-          if act then acts[#acts + 1] = { text = act.label, subText = act.name } end
-        end
-        local c = hs.chooser.new(function(choice)
-          if choice then runAction(choice.subText, captured) end
-        end)
-        c:choices(acts)
-        c:placeholderText("Select an action…")
-        c:show()
+        capturedSelection = selection.getSelectedText()
+        chooser:show()
       end)
     end
   end

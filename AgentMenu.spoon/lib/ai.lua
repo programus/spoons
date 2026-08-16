@@ -77,9 +77,18 @@ local function attemptModel(cfg, modelId, messages, onSuccess, onFail)
   end)
 end
 
+-- curl writes this sentinel to stdout once the transfer finishes (see the -w
+-- argument below).  Without it there is no way to see the HTTP status of a
+-- streamed request: -s suppresses it and the body is consumed as SSE.
+local HTTP_SENTINEL = "__AGENTMENU_HTTP:"
+-- Cap on how much provider error output we keep for the error message.
+local ERRBUF_MAX    = 2048
+
 --- Stream one model call via hs.task + curl SSE.
 -- onChunk(deltaText) is called for each content delta.
--- onSuccess(fullContent, modelName, providerName) is called when the stream ends.
+-- onSuccess(fullContent, modelName, providerName, warning) is called when the
+--   stream ends with content; `warning` is nil normally, or
+--   { kind = "incomplete", detail = string } when the response looks truncated.
 -- onFail(errMsg) is called when no content was received (triggers fallback).
 -- Returns a cancel function.
 local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, onFail)
@@ -94,11 +103,38 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
 
   log.d("attemptModelStream: POST " .. url .. " model=" .. model.name .. " (id: " .. modelId .. ")")
 
-  local fullContent = ""
-  local lineBuffer  = ""
+  local fullContent  = ""
+  local lineBuffer   = ""
+  local errBuf       = ""
+  ---@type number|nil
+  local httpCode     = nil
+  local reasoningLen = 0
+
+  -- Remember anything that looks like a diagnostic so failures can say why.
+  local function noteError(s)
+    if s == nil or s == "" or #errBuf >= ERRBUF_MAX then return end
+    errBuf = errBuf .. (errBuf == "" and "" or "\n") .. s
+    if #errBuf > ERRBUF_MAX then errBuf = errBuf:sub(1, ERRBUF_MAX) .. "…" end
+  end
 
   local function processLine(line)
-    if line:sub(1, 5) ~= "data:" then return end
+    if line == "" then return end
+
+    if line:sub(1, #HTTP_SENTINEL) == HTTP_SENTINEL then
+      httpCode = tonumber(line:sub(#HTTP_SENTINEL + 1))
+      return
+    end
+
+    if line:sub(1, 5) ~= "data:" then
+      -- Not an SSE data line.  On 401/429/5xx curl prints the provider's error
+      -- JSON here; discarding it (as this code used to) is what turned every
+      -- API failure into an unhelpful "no content … exitCode=0".
+      if line:sub(1, 6) ~= "event:" and line:sub(1, 3) ~= "id:" and line:sub(1, 1) ~= ":" then
+        noteError(line)
+      end
+      return
+    end
+
     -- SSE allows optional single space after "data:" — strip it if present
     local data = line:sub(6)
     if data:sub(1, 1) == " " then data = data:sub(2) end
@@ -106,14 +142,38 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
     local ok, decoded = pcall(hs.json.decode, data)
     if not ok or type(decoded) ~= "table" then return end
     if decoded.error then
-      log.w("attemptModelStream: API error in stream: " .. hs.json.encode(decoded.error))
+      local e = decoded.error
+      local msg = (type(e) == "table" and (e.message or hs.json.encode(e))) or tostring(e)
+      log.w("attemptModelStream: API error in stream: " .. tostring(msg))
+      noteError("API error: " .. tostring(msg))
+      return
     end
     local choices = decoded.choices
     if type(choices) ~= "table" or #choices == 0 then return end
-    local delta = choices[1].delta
-    if type(delta) == "table" and type(delta.content) == "string" and #delta.content > 0 then
-      fullContent = fullContent .. delta.content
-      onChunk(delta.content)
+    local choice = choices[1]
+    local delta  = type(choice.delta) == "table" and choice.delta or nil
+
+    -- Field compatibility: OpenAI uses delta.content; some compatibility layers
+    -- send delta.text, and the legacy completions shape puts it on choice.text.
+    -- Reasoning tokens are counted but never merged into the answer.
+    local piece = nil
+    if delta then
+      if type(delta.content) == "string" then
+        piece = delta.content
+      elseif type(delta.text) == "string" then
+        piece = delta.text
+      end
+      if type(delta.reasoning_content) == "string" then
+        reasoningLen = reasoningLen + #delta.reasoning_content
+      end
+    end
+    if piece == nil and type(choice.text) == "string" then
+      piece = choice.text
+    end
+
+    if piece and #piece > 0 then
+      fullContent = fullContent .. piece
+      onChunk(piece)
     end
   end
 
@@ -137,19 +197,40 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
   local doneCb = function(exitCode, _stdout, stderr)
     if stderr and #stderr > 0 then
       log.w("attemptModelStream: final stderr: " .. stderr:sub(1, 500))
+      noteError("curl: " .. stderr:sub(1, 300):gsub("%s+$", ""))
     end
-    -- Flush any remaining partial line
+    -- Flush any remaining partial line (the -w sentinel has no trailing newline)
     if #lineBuffer > 0 then
-      processLine(lineBuffer:gsub("\r$", ""))
+      processLine((lineBuffer:gsub("\r$", "")))
       lineBuffer = ""
     end
-    log.d("attemptModelStream: done exitCode=" .. tostring(exitCode) .. " contentLen=" .. #fullContent)
-    if #fullContent > 0 then
-      onSuccess(fullContent, model.name, model.provider)
-    else
-      onFail(string.format("no content from model '%s' (id: %s) exitCode=%d",
-        model.name, modelId, exitCode))
+    log.d("attemptModelStream: done exitCode=" .. tostring(exitCode)
+      .. " http=" .. tostring(httpCode) .. " contentLen=" .. #fullContent)
+
+    local detail = {}
+    if httpCode then detail[#detail + 1] = "HTTP " .. httpCode end
+    if exitCode ~= 0 then detail[#detail + 1] = "curl exit " .. tostring(exitCode) end
+    if #fullContent == 0 and reasoningLen > 0 then
+      detail[#detail + 1] = reasoningLen .. " reasoning chars but no answer content"
     end
+    if errBuf ~= "" then detail[#detail + 1] = errBuf end
+    local detailStr = table.concat(detail, " | ")
+
+    local httpBad = httpCode ~= nil and httpCode ~= 200
+    if #fullContent == 0 or httpBad then
+      onFail(string.format("model '%s' (id: %s) failed%s",
+        model.name, modelId, detailStr ~= "" and (": " .. detailStr) or ""))
+      return
+    end
+
+    -- Content arrived but the transfer did not end cleanly: keep the text and
+    -- let the caller warn that it may be truncated, rather than silently
+    -- presenting a half answer as complete.
+    local warning = nil
+    if exitCode ~= 0 then
+      warning = { kind = "incomplete", detail = detailStr }
+    end
+    onSuccess(fullContent, model.name, model.provider, warning)
   end
 
   local args = {
@@ -158,6 +239,7 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
     "-H", "Content-Type: application/json",
     "-H", "Authorization: Bearer " .. provider.apiKey,
     "-d", body,
+    "-w", "\n" .. HTTP_SENTINEL .. "%{http_code}",
     url,
   }
 
@@ -209,13 +291,15 @@ end
 
 --- Stream the AI with a full model fallback chain.
 -- onChunk(deltaText) is called for each streamed token.
--- callback(err, fullContent, modelName, providerName) is called when the stream ends.
+-- callback(err, fullContent, modelName, providerName, warning) is called when
+-- the stream ends; `warning` is nil normally, or { kind, detail } when the
+-- response arrived but looks truncated.
 -- Returns a cancel function.
 --@param cfg      table    Normalised config (from config.lua)
 --@param profile  string   modelSetProfile name (or nil → first profile)
 --@param messages table    Array of {role=string, content=string}
 --@param onChunk  function(deltaText: string)
---@param callback function(err, content, modelName, providerName)
+--@param callback function(err, content, modelName, providerName, warning)
 --@return function  cancel()
 function M.callStream(cfg, profile, messages, onChunk, callback)
   if not profile then
@@ -244,9 +328,9 @@ function M.callStream(cfg, profile, messages, onChunk, callback)
       function(chunk)
         if attemptActive then onChunk(chunk) end
       end,
-      function(content, modelName, providerName)
+      function(content, modelName, providerName, warning)
         if attemptActive then
-          callback(nil, content, modelName, providerName)
+          callback(nil, content, modelName, providerName, warning)
         end
       end,
       function(errMsg)

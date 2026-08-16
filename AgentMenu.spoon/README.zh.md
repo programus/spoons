@@ -43,11 +43,13 @@ spoon.AgentMenu:configure(cfg):start()
 所有配置均在你的 `agentmenu_config.lua` 文件中（从 `config_example.lua` 复制而来）。  
 完整的注释参考请查看 [config_example.lua](config_example.lua)。
 
-配置表有七个顶级字段：
+配置表包含以下顶级字段：
 
 | 字段 | 说明 |
 |------|------|
-| `lang` | 界面语言 — `"en"`（默认）或 `"zh"`；详见[本地化](#本地化) |
+| `lang` | 界面语言 — `"en"`（默认）、`"zh"` 或 `"ja"`；详见[本地化](#本地化) |
+| `preloadWebview` | 可选，默认 `true`。在 `start()` 后约 2 秒预先创建结果窗口，而不是首次使用时才建 —— 每次调用都省掉一次 WebView 冷启动，代价是常驻约 40 MB |
+| `axTimeout` | 可选，默认 `0.5`（秒）。读取选中文字时的 Accessibility 消息超时。系统默认是 6 秒，遇到无响应的应用会卡住 Hammerspoon 那么久。设为 `0` 则不改动系统默认值。注意：该设置修改的是**全局** AX 默认值，会影响其他 Spoon |
 | `providers` | AI 提供商列表 — 名称、基础 URL、API Key |
 | `models` | 模型列表 — 名称、提供商、可选 id |
 | `modelSetProfiles` | 命名配置组合，含主模型和备用链 |
@@ -74,6 +76,28 @@ spoon.AgentMenu:configure(cfg):start()
   modelSetProfile = "default",  -- 使用哪个模型配置组合
 },
 ```
+
+### 参数输入
+
+参数默认使用原生 `hs.chooser` 收集：即时弹出、输入即筛选，并且即使设置了
+`options`，也会额外提供一条「使用输入的内容」，因此任意文本都能提交。它只支持单行。
+
+回车提交的永远是高亮的第一行，而第一行就是你输入的内容 —— 所以输入列表里没有的值
+不需要再动鼠标。如果你把某个选项完整输入了，第一行会变成那个选项本身，匹配时忽略
+大小写（输入 `chinese` 提交的是 `Chinese`）。仅仅包含你所输入内容的选项排在下面，
+按 ↓ 即可选中。
+
+确实需要多行时，给该参数加上 `multiline = true`：
+
+```lua
+parameters = {
+  { name = "instruction", label = "你的指令", default = "", multiline = true },
+},
+```
+
+只要某个 action 有任一参数设了 `multiline`，该 action 的**全部**参数都会改用 HTML
+表单（带 textarea 的 WebView）收集 —— 因为 Hammerspoon 没有原生多行文本控件。
+表单弹出明显更慢，所以只在真正需要时才加这个开关。
 
 ### Prompt 模板语法
 
@@ -105,7 +129,8 @@ config_example.lua       — 完整注释配置参考
 lib/
   ai.lua                 — 异步 AI 客户端，支持流式传输与备用链
   config.lua             — 配置验证与规范化
-  param_dialog.lua       — 参数输入对话框（hs.webview）
+  param_chooser.lua      — 原生参数输入（hs.chooser），默认走这条
+  param_dialog.lua       — 参数输入表单（hs.webview），仅多行参数使用
   popup.lua              — 悬浮小圆点 → 按钮 → 快速菜单
   result_ui.lua          — 流式结果对话框
   selection.lua          — Accessibility API 文字选中监听
@@ -117,7 +142,9 @@ res/
     param_dialog.html    — 参数输入对话框模板
   i18n/
     en.lua               — 英文界面字符串
-    zh.lua               — 中文界面字符串      ja.lua               — 日文界面字符串```
+    zh.lua               — 中文界面字符串
+    ja.lua               — 日文界面字符串
+```
 
 ## 许可证
 

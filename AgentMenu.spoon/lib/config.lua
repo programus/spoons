@@ -116,11 +116,22 @@ function M.loadConfig(raw)
     end
 
     -- Validate parameters; mark built-ins
+    act._hasMultilineParam = false
     for j, param in ipairs(act.parameters) do
       assertField(param, "name", string.format("%s.parameters[%d]", ctx, j))
       param.isBuiltin = BUILTIN_NAMES[param.name] == true
       param.label     = param.label or param.name
       param.default   = param.default or ""
+      -- multiline: opt in to the HTML form (a textarea) instead of the native
+      -- chooser.  Hammerspoon has no native multi-line text field, so this is
+      -- the only way to accept more than one line of input.
+      if param.multiline ~= nil and type(param.multiline) ~= "boolean" then
+        err(string.format("%s.parameters[%d].multiline must be a boolean", ctx, j))
+      end
+      param.multiline = param.multiline == true
+      if param.multiline and not param.isBuiltin then
+        act._hasMultilineParam = true
+      end
       -- options: optional list of strings for combobox suggestions
       if param.options ~= nil then
         if type(param.options) ~= "table" then
@@ -132,6 +143,21 @@ function M.loadConfig(raw)
           end
         end
       end
+    end
+
+    -- Does this action actually need the clipboard?  Reading the pasteboard on
+    -- every invocation copies its whole contents for nothing when the prompt
+    -- never references {{clipboard}}.
+    act._usesClipboard = false
+    for expr in tostring(act.prompt):gmatch("{{([^}]+)}}") do
+      for segment in expr:gmatch("[^|]+") do
+        if segment:match("^%s*(.-)%s*$") == "clipboard" then
+          act._usesClipboard = true
+        end
+      end
+    end
+    for _, param in ipairs(act.parameters) do
+      if param.name == "clipboard" then act._usesClipboard = true end
     end
 
     actionByName[act.name] = act
@@ -165,6 +191,27 @@ function M.loadConfig(raw)
   -- Supported: "en", "zh".  Add res/i18n/<lang>.lua to support more languages.
   local lang = raw.lang or "en"
 
+  -- ── preloadWebview (optional) ────────────────────────────────────────────
+  -- Build the result window a couple of seconds after start() instead of on
+  -- first use.  Costs one resident WebContent process (~40 MB) and removes a
+  -- WKWebView cold start from every invocation.
+  local preloadWebview = raw.preloadWebview
+  if preloadWebview == nil then preloadWebview = true end
+  if type(preloadWebview) ~= "boolean" then
+    err("preloadWebview must be a boolean")
+  end
+
+  -- ── axTimeout (optional) ─────────────────────────────────────────────────
+  -- Accessibility messaging timeout in seconds.  The system default is 6s, and
+  -- an unresponsive app blocks Hammerspoon's main thread for that whole time
+  -- while we read the selection.  0 leaves the system default untouched.
+  -- Note: this changes the *global* AX default, so it affects other spoons too.
+  local axTimeout = raw.axTimeout
+  if axTimeout == nil then axTimeout = 0.5 end
+  if type(axTimeout) ~= "number" or axTimeout < 0 then
+    err("axTimeout must be a non-negative number (seconds; 0 = leave system default)")
+  end
+
   -- ── Return normalised config ─────────────────────────────────────────────
   return {
     providers       = raw.providers,
@@ -173,6 +220,8 @@ function M.loadConfig(raw)
     replaceFallback = replaceFallback,
     actions         = raw.actions,
     lang            = lang,
+    preloadWebview  = preloadWebview,
+    axTimeout       = axTimeout,
     toolbar         = quickMenu,  -- internal field; populated from "quick-menu" or legacy "toolbar"
     hotkey          = hotkey,
     -- Lookup tables for quick access

@@ -135,7 +135,19 @@ function M.show(paramDefs, cb)
     end
   end)
   webview:show()
-  webview:hswindow():focus()
+  -- hswindow() is nil until AppKit has actually created the window; calling
+  -- :focus() on it unguarded raised an error on the very first show.
+  local win = webview:hswindow()
+  if win then
+    win:focus()
+  else
+    hs.timer.doAfter(0.1, function()
+      if webview then
+        local w2 = webview:hswindow()
+        if w2 then w2:focus() end
+      end
+    end)
+  end
 end
 
 return M

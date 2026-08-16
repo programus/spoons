@@ -27,6 +27,9 @@ body {
   --pre-bg:    #ececec;
   --user-bg:   #e0edff;
   --ai-bg:     #f5f5f5;
+  --err-bg:    #ffecec;
+  --err-text:  #a11;
+  --err-brd:   #f0b4b4;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -43,6 +46,9 @@ body {
     --pre-bg:    #2d2d2d;
     --user-bg:   #1a2a40;
     --ai-bg:     #1e1e1e;
+    --err-bg:    #3a2020;
+    --err-text:  #ff9b9b;
+    --err-brd:   #5c2c2c;
   }
 }
 
@@ -89,7 +95,8 @@ body {
   display: none;
   pointer-events: none;
 }
-.input-preview:hover::after { display: block; }
+/* Tooltip only when there actually is source text to show */
+.input-preview[data-full]:hover::after { display: block; }
 button {
   flex-shrink: 0;
   padding: 4px 14px;
@@ -124,6 +131,8 @@ button:hover { opacity: 0.85; }
   padding: 30px 16px 10px;
 }
 .turn-md { line-height: 1.6; word-break: break-word; }
+/* While streaming the raw text is shown verbatim in a single text node */
+.turn-md.streaming { white-space: pre-wrap; }
 .turn-md h1,.turn-md h2,.turn-md h3 { margin: 0.8em 0 0.3em; }
 .turn-md p  { margin: 0.4em 0; }
 .turn-md ul,.turn-md ol { margin: 0.4em 0 0.4em 1.4em; }
@@ -154,9 +163,39 @@ button:hover { opacity: 0.85; }
 }
 .turn-ai:hover .copy-turn-btn { opacity: 0.55; }
 .copy-turn-btn:hover { opacity: 1 !important; background: var(--bg2); }
+/* Feedback right where the click happened, in addition to the Lua-side alert */
+.copy-turn-btn.copied { opacity: 1 !important; font-size: 11px; white-space: nowrap; }
+
+/* ── Error / warning row ────────────────────────────────────────────────── */
+.turn-error {
+  margin: 6px 16px;
+  padding: 8px 10px;
+  background: var(--err-bg);
+  border: 1px solid var(--err-brd);
+  border-radius: 6px;
+  color: var(--err-text);
+  font-size: 12px;
+  line-height: 1.5;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.turn-error .err-msg {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SF Mono", Menlo, monospace;
+}
+.turn-error .retry-btn {
+  background: var(--accent);
+  color: #fff;
+  padding: 3px 12px;
+  align-self: center;
+}
 
 /* ── Loading indicator ──────────────────────────────────────────────────── */
-#loading-row {
+.loading-row {
   padding: 10px 16px;
   background: var(--ai-bg);
   color: var(--text-dim);
@@ -214,16 +253,11 @@ button:hover { opacity: 0.85; }
 <body>
 
 <div id="toolbar">
-  {{TOOLBAR_CONTENT}}
+  <span class="input-preview" id="input-preview"><span class="input-preview-text"></span></span>
   <button id="btn-cancel" onclick="cancelAction()">{{CLOSE_LABEL}}</button>
 </div>
 
-<div id="chat">
-  <div id="loading-row">
-    {{THINKING_LABEL}}
-    <span class="dot">●</span><span class="dot">●</span><span class="dot">●</span>
-  </div>
-</div>
+<div id="chat"></div>
 
 <div id="followup-area">
   <textarea id="followup-input" rows="1" placeholder="{{FOLLOWUP_PLACEHOLDER}}"></textarea>
@@ -234,20 +268,28 @@ button:hover { opacity: 0.85; }
 <script>
 var marked=(function(){
 function e(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+// Inline formatting.  HTML-escape FIRST so that raw markup in the model output
+// can never be injected into the page; every tag added afterwards is our own.
 function i(s){
-  s=s.replace(/`([^`]+)`/g,function(_,c){return"<code>"+e(c)+"</code>";});
+  s=e(s);
+  s=s.replace(/`([^`]+)`/g,"<code>$1</code>");
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,"<strong><em>$1</em></strong>");
   s=s.replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>");
   s=s.replace(/\*(.+?)\*/g,"<em>$1</em>");
-  s=s.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2">$1</a>');
+  s=s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,function(m,t,u){
+    // Only http(s)/mailto links become anchors; anything else stays literal text
+    if(!/^(https?:\/\/|mailto:)/i.test(u))return m;
+    return '<a href="'+u.replace(/"/g,"%22")+'">'+t+"</a>";
+  });
   return s;
 }
+function fence(buf){return"<pre><code>"+e(buf.replace(/\n$/,""))+"</code></pre>";}
 function p(src){
   var lines=src.split("\n"),out="",j=0,inCode=false,buf="";
   while(j<lines.length){
     var l=lines[j];
     if(!inCode&&/^```/.test(l)){inCode=true;buf="";j++;continue;}
-    if(inCode){if(/^```/.test(l)){out+="<pre><code>"+e(buf.replace(/\n$/,""))+"</code></pre>";inCode=false;buf="";}else{buf+=l+"\n";}j++;continue;}
+    if(inCode){if(/^```/.test(l)){out+=fence(buf);inCode=false;buf="";}else{buf+=l+"\n";}j++;continue;}
     var h=l.match(/^(#{1,6})\s+(.*)/);
     if(h){out+="<h"+h[1].length+">"+i(h[2])+"</h"+h[1].length+">";j++;continue;}
     if(/^[-*+]\s/.test(l)){out+="<ul>";while(j<lines.length&&/^[-*+]\s/.test(lines[j])){out+="<li>"+i(lines[j].slice(2))+"</li>";j++;}out+="</ul>";continue;}
@@ -255,6 +297,9 @@ function p(src){
     if(l.trim()===""){j++;continue;}
     out+="<p>"+i(l)+"</p>";j++;
   }
+  // An unterminated fence (truncated model output, nested fences, ``` inside the
+  // text itself) must not swallow the rest of the answer — flush what we have.
+  if(inCode&&buf!=="")out+=fence(buf);
   return out;
 }
 return {parse:p};
@@ -263,60 +308,196 @@ return {parse:p};
 
 <script>
 var COPY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
-var COPY_TURN_TITLE = '{{COPY_TURN_TITLE}}';
-var THINKING_LABEL  = '{{THINKING_LABEL}}';
-var currentTurnDiv = null;
 
-function cancelAction() {
-  webkit.messageHandlers.agentMenuResult.postMessage({action:'cancel'});
+// Localised strings, injected as JSON by result_ui.lua (never string-spliced:
+// an apostrophe in a translation used to break this whole script).
+var I18N = {{I18N_JSON}};
+
+var MAX_PREVIEW  = 60;    // chars shown inline in the toolbar
+var MAX_TOOLTIP  = 2000;  // chars shown in the hover tooltip
+
+var currentTurnDiv  = null;   // AI bubble currently being written to
+var streamTextNode  = null;   // text node inside it, for O(delta) appends
+
+// ── Small helpers ──────────────────────────────────────────────────────────
+function post(payload) {
+  webkit.messageHandlers.agentMenuResult.postMessage(payload);
+}
+function chatEl()    { return document.getElementById('chat'); }
+function scrollBot() { var c = chatEl(); c.scrollTop = c.scrollHeight; }
+
+function removeLoadingRow() {
+  var row = document.getElementById('loading-row');
+  if (row) row.remove();
 }
 
-function appendStreamChunk(text) {
-  var chat = document.getElementById('chat');
-  var loading = document.getElementById('loading-row');
-  if (loading) {
-    loading.remove();
-    currentTurnDiv = document.createElement('div');
-    currentTurnDiv.className = 'turn-ai';
-    currentTurnDiv.dataset.raw = '';
-    var inner = document.createElement('div');
-    inner.className = 'turn-md';
-    currentTurnDiv.appendChild(inner);
-    chat.appendChild(currentTurnDiv);
-  }
-  if (currentTurnDiv) {
-    currentTurnDiv.dataset.raw += text;
-    var inner = currentTurnDiv.querySelector('.turn-md');
-    if (inner) inner.textContent = currentTurnDiv.dataset.raw;
-  }
-  chat.scrollTop = chat.scrollHeight;
-}
+// ── Called by Lua ──────────────────────────────────────────────────────────
 
-function finalizeCurrentTurn() {
-  if (!currentTurnDiv) return;
-  var raw = currentTurnDiv.dataset.raw;
-  var inner = currentTurnDiv.querySelector('.turn-md');
-  if (inner) {
-    inner.innerHTML = marked.parse(raw);
-  }
-  var btn = document.createElement('button');
-  btn.className = 'copy-turn-btn';
-  btn.title = COPY_TURN_TITLE;
-  btn.innerHTML = COPY_SVG;
-  var rawCapture = raw;
-  btn.onclick = function(e) {
-    e.stopPropagation();
-    webkit.messageHandlers.agentMenuResult.postMessage({action:'copy', text:rawCapture});
-  };
-  currentTurnDiv.appendChild(btn);
+// Reset the (persistent) page for a brand new request.
+function resetDialog(inputText) {
+  chatEl().innerHTML = '';
   currentTurnDiv = null;
+  streamTextNode = null;
+  setInputPreview(inputText);
+  var ta = document.getElementById('followup-input');
+  ta.value = '';
+  ta.style.height = '';
+  document.getElementById('btn-send').disabled = false;
+  document.getElementById('followup-area').style.display = 'none';
+  appendLoadingRow();
+}
+
+function setInputPreview(text) {
+  var wrap = document.getElementById('input-preview');
+  var span = wrap.querySelector('.input-preview-text');
+  if (!text) {
+    wrap.style.display = 'none';
+    wrap.removeAttribute('data-full');
+    span.textContent = '';
+    return;
+  }
+  wrap.style.display = 'block';
+  wrap.setAttribute('data-full',
+    text.length > MAX_TOOLTIP ? text.slice(0, MAX_TOOLTIP) + '…' : text);
+  var flat = text.replace(/\s+/g, ' ').trim();
+  span.textContent = flat.length > MAX_PREVIEW ? flat.slice(0, MAX_PREVIEW) + '…' : flat;
+}
+
+function appendLoadingRow() {
+  removeLoadingRow();
+  var row = document.createElement('div');
+  row.id = 'loading-row';
+  row.className = 'loading-row';
+  row.appendChild(document.createTextNode((I18N.THINKING || '') + ' '));
+  for (var k = 0; k < 3; k++) {
+    var d = document.createElement('span');
+    d.className = 'dot';
+    d.textContent = '●';
+    row.appendChild(d);
+  }
+  chatEl().appendChild(row);
+  scrollBot();
+}
+
+// Return the AI bubble to write into, creating a fresh one when the previous
+// one has already been finalised.
+function ensureTurnDiv() {
+  if (currentTurnDiv && currentTurnDiv.dataset.done !== '1') return currentTurnDiv;
+  var div = document.createElement('div');
+  div.className = 'turn-ai';
+  div.__raw = '';
+  var inner = document.createElement('div');
+  inner.className = 'turn-md streaming';
+  streamTextNode = document.createTextNode('');
+  inner.appendChild(streamTextNode);
+  div.appendChild(inner);
+  chatEl().appendChild(div);
+  currentTurnDiv = div;
+  return div;
+}
+
+// Streaming append.  Text goes into one fixed trailing text node, so the cost
+// is proportional to the delta rather than to the whole answer so far.
+function appendStreamChunk(text) {
+  removeLoadingRow();
+  var div = ensureTurnDiv();
+  div.__raw += text;
+  if (streamTextNode) {
+    streamTextNode.appendData(text);
+  } else {
+    var inner = div.querySelector('.turn-md');
+    if (inner) inner.textContent = div.__raw;
+  }
+  scrollBot();
+}
+
+// Authoritative content for the current turn: called with the complete text
+// held on the Lua side, so the answer is displayed even if no chunk arrived.
+function setTurnContent(text) {
+  removeLoadingRow();
+  var div = ensureTurnDiv();
+  div.__raw = text;
+  var inner = div.querySelector('.turn-md');
+  if (inner) {
+    inner.classList.remove('streaming');
+    inner.innerHTML = marked.parse(text);
+  }
+  streamTextNode = null;
+  if (!div.querySelector('.copy-turn-btn')) {
+    var btn = document.createElement('button');
+    btn.className = 'copy-turn-btn';
+    btn.title = I18N.COPY_TURN || '';
+    btn.innerHTML = COPY_SVG;
+    btn.onclick = function(ev) {
+      ev.stopPropagation();
+      post({ action: 'copy', text: div.__raw });
+      if (btn.__flash) clearTimeout(btn.__flash);
+      btn.classList.add('copied');
+      btn.textContent = I18N.COPY_CONFIRM || '';
+      btn.__flash = setTimeout(function() {
+        btn.classList.remove('copied');
+        btn.innerHTML = COPY_SVG;
+        btn.__flash = null;
+      }, 1200);
+    };
+    div.appendChild(btn);
+  }
+  div.dataset.done = '1';
+  scrollBot();
+}
+
+// Finalise whatever was streamed so far (used on the error path, where the
+// Lua side has no authoritative full text to hand us).
+function finalizeStreamedTurn() {
+  if (currentTurnDiv && currentTurnDiv.dataset.done !== '1') {
+    setTurnContent(currentTurnDiv.__raw || '');
+  }
+}
+
+// Show an error / warning row, keeping the window and the conversation intact.
+// retryLabel is nil-able: pass an empty string for warnings that make no sense
+// to retry (e.g. "response may be incomplete").
+function showError(msg, retryLabel) {
+  removeLoadingRow();
+  finalizeStreamedTurn();
+
+  var box = document.createElement('div');
+  box.className = 'turn-error';
+  var m = document.createElement('div');
+  m.className = 'err-msg';
+  m.textContent = msg;
+  box.appendChild(m);
+
+  if (retryLabel) {
+    var b = document.createElement('button');
+    b.className = 'retry-btn';
+    b.textContent = retryLabel;
+    b.onclick = function(ev) {
+      ev.stopPropagation();
+      box.remove();
+      post({ action: 'retry' });
+    };
+    box.appendChild(b);
+  }
+  chatEl().appendChild(box);
+
+  document.getElementById('btn-send').disabled = false;
+  document.getElementById('followup-area').style.display = 'flex';
+  scrollBot();
 }
 
 function showFollowup() {
-  finalizeCurrentTurn();
+  finalizeStreamedTurn();
+  document.getElementById('btn-send').disabled = false;
   var area = document.getElementById('followup-area');
   area.style.display = 'flex';
   document.getElementById('followup-input').focus();
+  scrollBot();
+}
+
+// ── User actions ───────────────────────────────────────────────────────────
+function cancelAction() {
+  post({ action: 'cancel' });
 }
 
 function sendFollowup() {
@@ -326,33 +507,37 @@ function sendFollowup() {
   ta.value = '';
   ta.style.height = '';
   document.getElementById('btn-send').disabled = true;
-  var chat = document.getElementById('chat');
+
   var userDiv = document.createElement('div');
   userDiv.className = 'turn-user';
   userDiv.textContent = text;
-  chat.appendChild(userDiv);
-  var loadDiv = document.createElement('div');
-  loadDiv.id = 'loading-row';
-  loadDiv.innerHTML = THINKING_LABEL + ' <span class="dot">●</span><span class="dot">●</span><span class="dot">●</span>';
-  loadDiv.style.cssText = 'padding:10px 16px;background:var(--ai-bg);color:var(--text-dim);font-size:15px;display:flex;align-items:center;gap:8px;';
-  chat.appendChild(loadDiv);
-  chat.scrollTop = chat.scrollHeight;
-  webkit.messageHandlers.agentMenuResult.postMessage({action:'followup', text:text});
+  chatEl().appendChild(userDiv);
+  appendLoadingRow();
+  post({ action: 'followup', text: text });
 }
 
-document.addEventListener('DOMContentLoaded', function() {
+// ── Static wiring (runs once; the page is loaded once and reused) ──────────
+(function() {
   var ta = document.getElementById('followup-input');
   ta.addEventListener('input', function() {
     ta.style.height = '';
     ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
   });
-  ta.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && e.metaKey) {
-      e.preventDefault();
+  ta.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Enter' && ev.metaKey) {
+      ev.preventDefault();
       sendFollowup();
     }
   });
-});
+  // Escape is handled here rather than by hs.webview:closeOnEscape(), which
+  // would tear the window down behind Lua's back.
+  document.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      cancelAction();
+    }
+  });
+})();
 </script>
 
 </body>

@@ -15,6 +15,19 @@ return {
   -- Unknown codes silently fall back to "en".
   lang = "en",
 
+  -- Optional. Default true. Build the result window ~2s after start() instead
+  -- of on first use.  Costs one resident WebContent process (~40 MB) and
+  -- removes a WKWebView cold start from every invocation — it is also what
+  -- guarantees streamed output can never race the page load.
+  preloadWebview = true,
+
+  -- Optional. Default 0.5 (seconds). Accessibility messaging timeout used when
+  -- reading the current selection.  The system default is 6s, during which an
+  -- unresponsive app blocks Hammerspoon's main thread.  Set to 0 to leave the
+  -- system default untouched.
+  -- Note: this changes the *global* AX default, so it affects other spoons too.
+  axTimeout = 0.5,
+
   -- ────────────────────────────────────────────────────────────────────────
   -- 1. Providers
   --    Each provider entry requires:
@@ -115,10 +128,26 @@ return {
   --   {{clipboard}} — current clipboard contents
   --
   -- ── User-defined parameters ──────────────────────────────────────────────
-  --   { name, label, default, options }
-  --   A dialog is shown to collect values before the action runs.
-  --   `options` is an optional list of strings for a combobox dropdown.
+  --   { name, label, default, options, multiline }
+  --   Values are collected before the action runs.
+  --   `options`   — optional list of strings offered as pickable rows.
+  --   `multiline` — optional, default false.  See "input UI" below.
   --   Built-in names (selection, clipboard) in parameters are silently ignored.
+  --
+  -- ── Which input UI is used ───────────────────────────────────────────────
+  --   By default parameters are collected with a native hs.chooser: it opens
+  --   instantly, filters as you type, and any typed text can be submitted (a
+  --   "use what you typed" row is offered) even when `options` is set.
+  --   It is single-line only.
+  --
+  --   Enter takes the highlighted first row, which is always what was typed —
+  --   or, when an option was typed out in full (case-insensitively), that
+  --   option.  So neither a listed nor an unlisted value ever needs the mouse.
+  --
+  --   If ANY parameter of an action sets `multiline = true`, that action falls
+  --   back to the HTML form (a WebView with textareas) for all its parameters,
+  --   because Hammerspoon has no native multi-line text field.  This is slower
+  --   to open, so only set it where more than one line is genuinely needed.
   -- ────────────────────────────────────────────────────────────────────────
   actions = {
 
@@ -178,7 +207,9 @@ return {
       modelSetProfile = "default",
     },
 
-    -- Example 5: freeform custom instruction
+    -- Example 5: freeform custom instruction.
+    -- multiline = true → this action uses the HTML form (textarea) instead of
+    -- the native single-line chooser.
     {
       name    = "custom",
       label   = "Custom prompt",
@@ -186,7 +217,7 @@ return {
 
 {{selection|clipboard}}]],
       parameters = {
-        { name = "instruction", label = "Your instruction", default = "" },
+        { name = "instruction", label = "Your instruction", default = "", multiline = true },
       },
       outputMode      = "dialog",
       modelSetProfile = "default",

@@ -43,11 +43,13 @@ spoon.AgentMenu:configure(cfg):start()
 設定はすべて `agentmenu_config.lua` ファイルに記述します（`config_example.lua` からコピー）。  
 完全な注釈付きリファレンスは [config_example.lua](config_example.lua) を参照してください。
 
-設定テーブルには 7 つのトップレベルキーがあります：
+設定テーブルのトップレベルキーは以下のとおりです：
 
 | キー | 説明 |
 |------|------|
 | `lang` | UI 言語 — `"en"`（デフォルト）・`"zh"`・`"ja"` など；[ローカライズ](#ローカライズ) を参照 |
+| `preloadWebview` | 省略可能、デフォルト `true`。結果ウィンドウを初回使用時ではなく `start()` の約 2 秒後に生成します。呼び出しごとの WebView コールドスタートがなくなる代わりに、常時約 40 MB を消費します |
+| `axTimeout` | 省略可能、デフォルト `0.5`（秒）。選択テキスト取得時の Accessibility メッセージのタイムアウト。システム既定は 6 秒で、応答しないアプリではその間 Hammerspoon が停止します。`0` にするとシステム既定値を変更しません。注意：これは**グローバル**の AX 既定値を変更するため、他の Spoon にも影響します |
 | `providers` | AI プロバイダーリスト — 名前・ベース URL・API キー |
 | `models` | モデルリスト — 名前・プロバイダー・省略可能な id |
 | `modelSetProfiles` | プライマリモデルとフォールバックチェーンを持つ名前付きプロファイル |
@@ -74,6 +76,30 @@ spoon.AgentMenu:configure(cfg):start()
   modelSetProfile = "default",    -- 使用するプロファイル
 },
 ```
+
+### パラメーター入力
+
+パラメーターは既定でネイティブの `hs.chooser` で入力します。即座に開き、入力しながら
+絞り込めます。`options` を指定していても「入力した内容を使う」という行が追加されるので、
+任意のテキストを送信できます。ただし単一行のみです。
+
+Enter で決定されるのは常にハイライトされた先頭行で、その行は入力した内容そのものです
+—— つまり `options` にない値でもマウスは不要です。選択肢をそのまま全部入力した場合は
+先頭行がその選択肢になり、照合は大文字小文字を区別しません（`chinese` と入力すると
+`Chinese` が送信されます）。入力内容を含むだけの選択肢はその下に並ぶので、↓ で選べます。
+
+複数行がどうしても必要な場合は、そのパラメーターに `multiline = true` を付けます：
+
+```lua
+parameters = {
+  { name = "instruction", label = "指示", default = "", multiline = true },
+},
+```
+
+いずれか 1 つのパラメーターに `multiline` が付いていると、そのアクションの
+**すべての**パラメーターが HTML フォーム（textarea を持つ WebView）で入力されます。
+Hammerspoon にはネイティブの複数行テキスト入力が存在しないためです。フォームは
+表示が明らかに遅いので、本当に必要なときだけ使ってください。
 
 ### プロンプトテンプレートの構文
 
@@ -104,7 +130,8 @@ config_example.lua       — 注釈付き設定リファレンス
 lib/
   ai.lua                 — ストリーミングとフォールバック対応の非同期 AI クライアント
   config.lua             — 設定の検証と正規化
-  param_dialog.lua       — パラメーター入力ダイアログ（hs.webview）
+  param_chooser.lua      — ネイティブのパラメーター入力（hs.chooser）／既定
+  param_dialog.lua       — パラメーター入力フォーム（hs.webview）／複数行のみ
   popup.lua              — フローティングドット → ボタン → クイックメニュー
   result_ui.lua          — ストリーミング結果ダイアログ
   selection.lua          — Accessibility API テキスト選択監視
