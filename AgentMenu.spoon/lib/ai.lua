@@ -83,6 +83,35 @@ end
 local HTTP_SENTINEL = "__AGENTMENU_HTTP:"
 -- Cap on how much provider error output we keep for the error message.
 local ERRBUF_MAX    = 2048
+-- hs.task.new() documents that the streaming callback "may be invoked one last
+-- time after the termination callback has already been invoked".  When that
+-- happens the tail of the answer is still in flight while the termination
+-- callback runs, so finalising there hands the caller a half answer with no
+-- error whatsoever — which looks exactly like "the AI stopped halfway".
+-- Measured on this machine: that last call lands after termination on most
+-- transfers, and it carries answer text often enough to be noticed in use.
+-- The -w sentinel is written after the last body byte, so it doubles as proof
+-- that everything arrived; when it has not, wait for it before finalising.
+-- Deadline for that wait; the tail normally lands within one runloop pass.
+local TAIL_WAIT_LIMIT = 0.60
+
+-- Anchor for pending one-shot timers.  hs.timer stops a timer that gets
+-- garbage-collected, and a timer created inside a task callback is reachable
+-- only from that callback — which hs.task releases once the task is gone.  Such
+-- a timer can silently never fire: while writing the tail wait below, one call
+-- in roughly twenty stranded itself with no callback at all.
+local pendingTimers = {}
+
+--- hs.timer.doAfter that cannot be garbage-collected before it fires.
+local function runLater(delay, fn)
+  local t
+  t = hs.timer.doAfter(delay, function()
+    pendingTimers[t] = nil
+    fn()
+  end)
+  pendingTimers[t] = true
+  return t
+end
 
 --- Stream one model call via hs.task + curl SSE.
 -- onChunk(deltaText) is called for each content delta.
@@ -109,6 +138,16 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
   ---@type number|nil
   local httpCode     = nil
   local reasoningLen = 0
+  local sawDone      = false  -- provider sent the terminating "data: [DONE]"
+  ---@type string|nil
+  local finishReason = nil    -- last non-nil choices[1].finish_reason
+  local cancelled    = false  -- caller invoked the returned cancel function
+  local finished     = false  -- finalize() has run; it must run exactly once
+  local waitingTail  = false  -- curl is gone; only the response tail is missing
+  ---@type number|nil
+  local termExit     = nil    -- exit code the termination callback reported
+  ---@type table|nil
+  local tailDeadline = nil    -- timer that gives up on the tail
 
   -- Remember anything that looks like a diagnostic so failures can say why.
   local function noteError(s)
@@ -138,7 +177,7 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
     -- SSE allows optional single space after "data:" — strip it if present
     local data = line:sub(6)
     if data:sub(1, 1) == " " then data = data:sub(2) end
-    if data == "[DONE]" then return end
+    if data == "[DONE]" then sawDone = true return end
     local ok, decoded = pcall(hs.json.decode, data)
     if not ok or type(decoded) ~= "table" then return end
     if decoded.error then
@@ -152,6 +191,12 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
     if type(choices) ~= "table" or #choices == 0 then return end
     local choice = choices[1]
     local delta  = type(choice.delta) == "table" and choice.delta or nil
+
+    -- Usually arrives on the final chunk, whose delta is empty: "stop" means the
+    -- model finished, "length" means the provider cut it off at its own limit.
+    if type(choice.finish_reason) == "string" then
+      finishReason = choice.finish_reason
+    end
 
     -- Field compatibility: OpenAI uses delta.content; some compatibility layers
     -- send delta.text, and the legacy completions shape puts it on choice.text.
@@ -177,39 +222,83 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
     end
   end
 
+  -- Consume every complete line currently buffered.  A trailing partial line is
+  -- left alone on purpose: handing half a JSON object to processLine would fail
+  -- to decode and drop that delta for good.
+  local function drainLines()
+    while true do
+      local nl = lineBuffer:find("\n", 1, true)
+      if not nl then break end
+      local line = lineBuffer:sub(1, nl - 1):gsub("\r$", "")
+      lineBuffer  = lineBuffer:sub(nl + 1)
+      processLine(line)
+    end
+  end
+
+  -- True once the -w sentinel is in hand (or at least in the buffer, where it
+  -- sits until the final flush because it carries no trailing newline).
+  local function tailArrived()
+    return httpCode ~= nil or lineBuffer:find(HTTP_SENTINEL, 1, true) ~= nil
+  end
+
+  -- Forward-declared: streamCb below finalises a late-arriving tail.
+  ---@type function
+  local finalize
+
   local streamCb = function(_task, stdout, stderr)
     if stderr and #stderr > 0 then
       log.w("attemptModelStream: stderr: " .. stderr:sub(1, 500))
     end
     if stdout and #stdout > 0 then
       lineBuffer = lineBuffer .. stdout
-      while true do
-        local nl = lineBuffer:find("\n", 1, true)
-        if not nl then break end
-        local line = lineBuffer:sub(1, nl - 1):gsub("\r$", "")
-        lineBuffer  = lineBuffer:sub(nl + 1)
-        processLine(line)
-      end
+      drainLines()
+    end
+    -- This is the late call hs.task warns about, and the tail it carried is the
+    -- rest of the answer: report it now rather than sitting out the deadline.
+    if waitingTail and tailArrived() then
+      log.d("attemptModelStream: tail arrived after termination; finalising now")
+      finalize(termExit)
     end
     return true
   end
 
-  local doneCb = function(exitCode, _stdout, stderr)
-    if stderr and #stderr > 0 then
-      log.w("attemptModelStream: final stderr: " .. stderr:sub(1, 500))
-      noteError("curl: " .. stderr:sub(1, 300):gsub("%s+$", ""))
+  finalize = function(exitCode)
+    if finished then return end
+    finished = true
+    if tailDeadline then
+      pendingTimers[tailDeadline] = nil
+      tailDeadline:stop()
+      tailDeadline = nil
     end
-    -- Flush any remaining partial line (the -w sentinel has no trailing newline)
+    if cancelled then
+      log.d("attemptModelStream: cancelled by caller; not reporting a result")
+      return
+    end
+
+    drainLines()
+    -- Whatever is left is the last, newline-less line — normally the sentinel.
     if #lineBuffer > 0 then
       processLine((lineBuffer:gsub("\r$", "")))
       lineBuffer = ""
     end
-    log.d("attemptModelStream: done exitCode=" .. tostring(exitCode)
-      .. " http=" .. tostring(httpCode) .. " contentLen=" .. #fullContent)
+
+    -- curl exited cleanly, so it wrote the sentinel; not having it means the
+    -- stream's tail was never handed to us and the answer is short by that much.
+    local tailLost = (exitCode == 0 and httpCode == nil)
+
+    log.d(string.format(
+      "attemptModelStream: done exitCode=%s http=%s contentLen=%d finish=%s [DONE]=%s%s",
+      tostring(exitCode), tostring(httpCode), #fullContent,
+      tostring(finishReason), tostring(sawDone), tailLost and " TAIL-LOST" or ""))
 
     local detail = {}
     if httpCode then detail[#detail + 1] = "HTTP " .. httpCode end
     if exitCode ~= 0 then detail[#detail + 1] = "curl exit " .. tostring(exitCode) end
+    if tailLost then detail[#detail + 1] = "response tail never delivered" end
+    if finishReason and finishReason ~= "stop" then
+      detail[#detail + 1] = "finish_reason=" .. finishReason
+        .. (finishReason == "length" and " (the model hit its own output limit)" or "")
+    end
     if #fullContent == 0 and reasoningLen > 0 then
       detail[#detail + 1] = reasoningLen .. " reasoning chars but no answer content"
     end
@@ -223,14 +312,55 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
       return
     end
 
-    -- Content arrived but the transfer did not end cleanly: keep the text and
-    -- let the caller warn that it may be truncated, rather than silently
-    -- presenting a half answer as complete.
+    -- Content arrived — but all of it?  Each of these says no, and each has to
+    -- reach the user: a half answer presented as complete is indistinguishable
+    -- from a bug in this spoon, which is precisely the confusion to avoid.
     local warning = nil
-    if exitCode ~= 0 then
+    if exitCode ~= 0 or tailLost
+      or finishReason == "length" or finishReason == "content_filter" then
       warning = { kind = "incomplete", detail = detailStr }
+    elseif not sawDone then
+      -- Too weak to warn on: not every compatibility layer sends [DONE].  It is
+      -- logged so a report of a short answer can be checked, not guessed at.
+      log.w("attemptModelStream: stream ended without [DONE] (model " .. model.name .. ")")
     end
     onSuccess(fullContent, model.name, model.provider, warning)
+  end
+
+  local doneCb = function(exitCode, stdout, stderr)
+    if stderr and #stderr > 0 then
+      log.w("attemptModelStream: final stderr: " .. stderr:sub(1, 500))
+      noteError("curl: " .. stderr:sub(1, 300):gsub("%s+$", ""))
+    end
+
+    -- Anything hs.task read but never dispatched to the streaming callback is
+    -- handed over here instead.  Measured on this machine: empty on 24 of 25
+    -- transfers, and on the 25th it holds precisely the bytes the streaming
+    -- callback never got.  Discarding it (as this code did) is how the tail of
+    -- an answer went missing every few dozen calls, with no error to show for
+    -- it.  The tailArrived() guard means a buffer that did arrive normally can
+    -- never be appended a second time.
+    if stdout and #stdout > 0 and not tailArrived() then
+      log.d("attemptModelStream: recovering " .. #stdout
+        .. " bytes the stream callback never received")
+      lineBuffer = lineBuffer .. stdout
+      drainLines()
+    end
+
+    -- The tail may still be in flight (see TAIL_WAIT_LIMIT above).  Only a clean
+    -- exit guarantees the sentinel was written, so only then is it worth
+    -- waiting; a killed or failed curl may never produce one.
+    if exitCode == 0 and not tailArrived() then
+      log.d("attemptModelStream: exit 0 but the tail has not been delivered yet — waiting for it")
+      waitingTail  = true
+      termExit     = exitCode
+      -- streamCb finalises the moment the tail lands; this only bounds the wait
+      -- for the case where it never does.
+      tailDeadline = runLater(TAIL_WAIT_LIMIT, function() finalize(exitCode) end)
+      return
+    end
+
+    finalize(exitCode)
   end
 
   local args = {
@@ -245,7 +375,13 @@ local function attemptModelStream(cfg, modelId, messages, onChunk, onSuccess, on
 
   local task = hs.task.new("/usr/bin/curl", doneCb, streamCb, args)
   task:start()
-  return function() task:terminate() end
+  return function()
+    -- Without this flag a cancel with no content yet reached onFail, which the
+    -- caller reads as "this model failed" and answers by calling the next model
+    -- in the chain — a request nobody asked for.
+    cancelled = true
+    task:terminate()
+  end
 end
 
 --- Call the AI with a full model fallback chain.
