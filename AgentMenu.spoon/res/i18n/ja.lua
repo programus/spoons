@@ -27,4 +27,13 @@ return {
   COPIED_ALERT         = "✓ クリップボードにコピーしました",
   ERROR_PREFIX         = "エラー",
   INCOMPLETE_WARNING   = "応答が不完全な可能性があります",
+
+  -- result_dialog.html — 元の選択範囲へ書き戻す
+  REPLACE_LABEL        = "置換",
+  REPLACE_TITLE        = "選択したテキストをこの回答で置き換えます",
+  REPLACE_BUSY_LABEL   = "置換中…",
+  REPLACE_CONFIRM_LABEL = "\226\156\147 \231\189\174\230\143\155\230\184\136\227\129\191",
+  REPLACED_ALERT       = "✓ 選択範囲を置き換えました",
+  REPLACE_STALE_ALERT  = "テキストが変更されたため置換しませんでした（コピーしてご利用ください）",
+  REPLACE_FAILED_ALERT = "選択範囲を置き換えられませんでした",
 }

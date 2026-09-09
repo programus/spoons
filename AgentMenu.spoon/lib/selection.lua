@@ -113,6 +113,138 @@ function M.resolveBuiltins()
   }
 end
 
+-- ── Replace target ────────────────────────────────────────────────────────
+-- The parameter chooser and the result dialog both take keyboard focus, so by
+-- the time the user can click "replace" the focused element is no longer the
+-- field the selection came from.  Capture the element up front instead: an
+-- AXUIElement reference stays valid and settable after focus has moved away,
+-- so the write lands without having to re-activate the source app.
+
+-- Above this size the post-write verification is skipped rather than reading a
+-- whole large document twice.
+local MAX_VERIFY_BYTES = 200000
+
+local function trimmed(s)
+  return (tostring(s):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+--- Capture what is needed to replace the current selection later on.
+-- Returns nil unless the focused element is writable *and* its selection still
+-- matches `expectedText`.  That match is the guarantee that we captured the
+-- element this action is actually about, and not some other focused field.
+--@param expectedText string|nil  The selection the action will operate on
+--@return table|nil  { element, text, range = {location, length} }
+function M.captureReplaceTarget(expectedText)
+  if not expectedText or expectedText == "" then return nil end
+  local focused = focusedElement()
+  if not focused then return nil end
+  local ok, target = pcall(function()
+    if not focused:isAttributeSettable("AXSelectedText") then return nil end
+    local text = focused:attributeValue("AXSelectedText")
+    if type(text) ~= "string" or trimmed(text) ~= trimmed(expectedText) then return nil end
+    local range = focused:attributeValue("AXSelectedTextRange")
+    return {
+      element = focused,
+      text    = text,
+      range   = range and { location = range.location, length = range.length } or nil,
+    }
+  end)
+  if not ok or not target then return nil end
+  log.d("selection: replace target captured (" .. #target.text .. " chars)")
+  return target
+end
+
+--- Write `text` over the selection captured by captureReplaceTarget().
+-- Restores the stored range first, then refuses the write when the text now
+-- sitting in that range is not what we sent to the model — the document was
+-- edited in the meantime and writing would clobber the wrong span.
+--@param target table|nil  Value returned by captureReplaceTarget()
+--@param text   string
+--@return boolean ok, string|nil reason  "no-target" | "stale" | AX error
+function M.applyReplace(target, text)
+  if not target or not target.element then return false, "no-target" end
+  local el = target.element
+  text = tostring(text or "")
+  local ok, err = pcall(function()
+    if target.range then
+      el:setAttributeValue("AXSelectedTextRange", target.range)
+    end
+    local cur = el:attributeValue("AXSelectedText")
+    if type(cur) == "string" and trimmed(cur) ~= trimmed(target.text) then
+      error("stale", 0)
+    end
+    -- Snapshot the field so the write can be checked afterwards.  Chromium-based
+    -- editors — Slack's message box, most Electron apps — advertise
+    -- AXSelectedText as settable and return success, then drop the write on the
+    -- floor.  Looking at the field is the only way to find out.
+    local before = el:attributeValue("AXValue")
+    if type(before) ~= "string" or #before > MAX_VERIFY_BYTES then before = nil end
+    el:setAttributeValue("AXSelectedText", text)
+    -- Skip the check when the answer equals the selection: nothing would change
+    -- even on an app that honours the write.
+    if before and trimmed(text) ~= trimmed(target.text) then
+      local after = el:attributeValue("AXValue")
+      if type(after) == "string" and after == before then error("ignored", 0) end
+    end
+  end)
+  if ok then
+    log.d("selection: replaced selection with " .. #tostring(text) .. " chars")
+    return true
+  end
+  log.w("selection: replace failed: " .. tostring(err))
+  return false, tostring(err)
+end
+
+--- Replace the captured selection by pasting instead of writing.
+-- The fallback for apps that ignore setAttributeValue("AXSelectedText").  It
+-- costs what a hand-made paste costs: the source app comes back to the front
+-- and the pasteboard is borrowed for about half a second.
+--@param target table|nil  Value returned by captureReplaceTarget()
+--@param text   string
+--@param cb     function(ok, reason)  reason: "no-target" | "no-app" | "stale" | "pasted"
+function M.pasteReplace(target, text, cb)
+  cb = cb or function() end
+  if not target or not target.element then return cb(false, "no-target") end
+  local el = target.element
+  local pid
+  pcall(function() pid = el:pid() end)
+  local app = pid and hs.application.applicationForPID(pid)
+  if not app then
+    log.w("selection: paste fallback has no owning application")
+    return cb(false, "no-app")
+  end
+
+  -- Preserve every flavour on the pasteboard, not just plain text: this runs
+  -- behind the user's back and they may have an image or rich text on it.
+  local saved
+  pcall(function() saved = hs.pasteboard.readAllData() end)
+  local function restoreClipboard()
+    if saved then pcall(function() hs.pasteboard.writeAllData(saved) end) end
+  end
+  hs.pasteboard.setContents(tostring(text or ""))
+
+  app:activate()
+  hs.timer.doAfter(0.25, function()
+    local placed = false
+    pcall(function()
+      if target.range then el:setAttributeValue("AXSelectedTextRange", target.range) end
+      local cur = el:attributeValue("AXSelectedText")
+      placed = type(cur) ~= "string" or trimmed(cur) == trimmed(target.text)
+    end)
+    if not placed then
+      restoreClipboard()
+      log.w("selection: paste fallback aborted, selection no longer matches")
+      return cb(false, "stale")
+    end
+    hs.eventtap.keyStroke({ "cmd" }, "v", 0, app)
+    hs.timer.doAfter(0.45, function()
+      restoreClipboard()
+      log.d("selection: replaced selection by pasting into " .. tostring(app:name()))
+      cb(true, "pasted")
+    end)
+  end)
+end
+
 --- Watch for text selection changes.
 -- Calls onShow(text, getRect) when a non-empty selection is detected.
 -- Calls onHide() when the selection is cleared or the user clicks/types.

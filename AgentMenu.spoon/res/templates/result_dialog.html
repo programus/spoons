@@ -107,6 +107,8 @@ button {
 }
 #btn-cancel, #btn-close { background: var(--btn-bg); color: var(--btn-text); }
 #btn-copy { background: var(--accent); color: #fff; }
+#btn-replace { display: none; background: var(--accent); color: #fff; margin-left: 6px; }
+#btn-replace:disabled { opacity: 0.5; cursor: default; }
 button:hover { opacity: 0.85; }
 
 /* ── Chat area ──────────────────────────────────────────────────────────── */
@@ -254,6 +256,7 @@ button:hover { opacity: 0.85; }
 
 <div id="toolbar">
   <span class="input-preview" id="input-preview"><span class="input-preview-text"></span></span>
+  <button id="btn-replace" onclick="doReplace()" title="{{REPLACE_TITLE}}">{{REPLACE_LABEL}}</button>
   <button id="btn-cancel" onclick="cancelAction()">{{CLOSE_LABEL}}</button>
 </div>
 
@@ -318,6 +321,10 @@ var MAX_TOOLTIP  = 2000;  // chars shown in the hover tooltip
 
 var currentTurnDiv  = null;   // AI bubble currently being written to
 var streamTextNode  = null;   // text node inside it, for O(delta) appends
+var lastTurnRaw     = null;   // raw text of the last completed answer
+var replaceOK       = false;  // did Lua capture a writable target for this run?
+var replaceBusy     = false;  // a write was posted to Lua and has not come back
+var replaceConsumed = false;  // the captured target has been written; it is one-shot
 
 // ── Small helpers ──────────────────────────────────────────────────────────
 function post(payload) {
@@ -338,6 +345,9 @@ function resetDialog(inputText) {
   chatEl().innerHTML = '';
   currentTurnDiv = null;
   streamTextNode = null;
+  lastTurnRaw    = null;
+  replaceConsumed = false;
+  hideReplaceBtn();
   setInputPreview(inputText);
   var ta = document.getElementById('followup-input');
   ta.value = '';
@@ -443,6 +453,8 @@ function setTurnContent(text) {
     div.appendChild(btn);
   }
   div.dataset.done = '1';
+  lastTurnRaw = text;
+  showReplaceBtn();
   scrollBot();
 }
 
@@ -493,6 +505,64 @@ function showFollowup() {
   area.style.display = 'flex';
   document.getElementById('followup-input').focus();
   scrollBot();
+}
+
+// ── Replace ────────────────────────────────────────────────────────────────
+// The button only exists when Lua managed to capture a writable target before
+// this window took focus; otherwise there is nothing to write back into.
+function replaceBtn() { return document.getElementById('btn-replace'); }
+
+function setReplaceAvailable(available) {
+  replaceOK = !!available;
+  if (!replaceOK) hideReplaceBtn();
+}
+
+function showReplaceBtn() {
+  // Once written, the target is spent — a follow-up answer must not re-arm it,
+  // or the second click would write into whatever is there now.
+  if (!replaceOK || replaceConsumed) return;
+  var b = replaceBtn();
+  // An explicit value, not '': clearing the inline style falls back to the
+  // stylesheet's `display: none` and the button would stay invisible.
+  b.style.display = 'inline-block';
+  b.disabled = false;
+  b.textContent = I18N.REPLACE || 'Replace';
+}
+
+function hideReplaceBtn() {
+  var b = replaceBtn();
+  b.style.display = 'none';
+  b.disabled = false;
+  replaceBusy = false;
+}
+
+// The write landed.  The window stays open on purpose — the button becomes a
+// receipt rather than closing everything, so the answer is still there to copy
+// if the text did not end up where the user wanted.
+function replaceDone() {
+  var b = replaceBtn();
+  replaceBusy     = false;
+  replaceConsumed = true;
+  b.disabled      = true;
+  b.textContent   = I18N.REPLACE_DONE || 'Replaced';
+}
+
+// Re-enable after Lua reports the write failed (stale selection, or the field
+// went away) — the answer is still on screen and can be copied instead.
+function resetReplaceBtn() {
+  var b = replaceBtn();
+  replaceBusy = false;
+  b.disabled = false;
+  b.textContent = I18N.REPLACE || 'Replace';
+}
+
+function doReplace() {
+  if (!replaceOK || replaceBusy || replaceConsumed || lastTurnRaw === null) return;
+  var b = replaceBtn();
+  replaceBusy = true;                                 // no double writes
+  b.disabled = true;
+  b.textContent = I18N.REPLACE_BUSY || b.textContent;
+  post({ action: 'replace', text: lastTurnRaw });
 }
 
 // ── User actions ───────────────────────────────────────────────────────────

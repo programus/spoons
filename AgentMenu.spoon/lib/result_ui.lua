@@ -33,6 +33,22 @@ function M.setTemplates(t)
   templates = t
 end
 
+-- Injected by init.lua; used for the dialog's "replace" button.
+---@type any
+local selection = nil
+
+--- Inject the selection module (called from init.lua after configure()).
+--@param s table  The selection module returned by req("selection")
+function M.setSelection(s)
+  selection = s
+end
+
+-- The element + selection range this run may write back into, captured before
+-- the chooser and this dialog stole focus.  nil when the source field was not
+-- writable, in which case the button stays hidden.
+---@type table|nil
+local replaceTarget = nil
+
 -- ── Dialog window state ──────────────────────────────────────────────────
 ---@type table|nil
 local webview     = nil
@@ -151,6 +167,49 @@ local function discardChunks()
   chunkBuf = {}
 end
 
+-- ── Replace ───────────────────────────────────────────────────────────────
+
+--- Write `text` over the original selection.
+-- Prefers the target captured before focus moved (that is the only thing that
+-- still works once this dialog is up).  Apps that quietly ignore the write get
+-- a paste instead.  Asynchronous, because that fallback has to wait for the
+-- other app to come forward.
+--@param text  string
+--@param cb    function(ok, reason)
+--@param allowFocusFallback boolean  Write into whatever has focus when no target
+--       was captured.  Only safe with no dialog in between (outputMode =
+--       "replace"); from the dialog the focused element is this window.
+local function doReplace(text, cb, allowFocusFallback)
+  cb = cb or function() end
+  if replaceTarget then
+    local target = replaceTarget
+    local ok, reason = selection.applyReplace(target, text)
+    if ok then
+      replaceTarget = nil                -- one-shot: the selection is gone now
+      return cb(true)
+    end
+    if reason == "ignored" then
+      -- The app accepted the write and dropped it (Slack's message box, and
+      -- Electron editors generally).  Paste it in instead.
+      return selection.pasteReplace(target, text, function(pok, preason)
+        if pok then replaceTarget = nil end
+        cb(pok, preason)
+      end)
+    end
+    return cb(false, reason)
+  end
+  if not allowFocusFallback then return cb(false, "no-target") end
+  local ok = false
+  pcall(function()
+    local focused = hs.axuielement.systemWideElement():attributeValue("AXFocusedUIElement")
+    if focused and focused:isAttributeSettable("AXSelectedText") then
+      focused:setAttributeValue("AXSelectedText", text)
+      ok = true
+    end
+  end)
+  return cb(ok, ok and nil or "no-target")
+end
+
 -- ── Webview construction ──────────────────────────────────────────────────
 
 local function handleMessage(msg)
@@ -168,6 +227,20 @@ local function handleMessage(msg)
   elseif data.action == "copy" then
     hs.pasteboard.setContents(data.text or "")
     hs.alert.show(templates.t("COPIED_ALERT"))
+
+  elseif data.action == "replace" then
+    -- Deliberately left open on success.  Replacing does not always land where
+    -- the user expects, and closing here would take the answer with it; the
+    -- button just marks itself done so it cannot fire twice.
+    doReplace(data.text or "", function(ok, reason)
+      if ok then
+        evalJS("replaceDone();")
+        hs.alert.show(templates.t("REPLACED_ALERT"))
+      else
+        hs.alert.show(templates.t(reason == "stale" and "REPLACE_STALE_ALERT" or "REPLACE_FAILED_ALERT"))
+        evalJS("resetReplaceBtn();")
+      end
+    end)
 
   elseif data.action == "close" then
     M.hide()
@@ -238,6 +311,9 @@ local function buildWebview()
     THINKING     = templates.t("THINKING_LABEL"),
     COPY_TURN    = templates.t("COPY_TURN_TITLE"),
     COPY_CONFIRM = templates.t("COPY_CONFIRM_LABEL"),
+    REPLACE      = templates.t("REPLACE_LABEL"),
+    REPLACE_BUSY = templates.t("REPLACE_BUSY_LABEL"),
+    REPLACE_DONE = templates.t("REPLACE_CONFIRM_LABEL"),
   })
   wv:html(templates.load("result_dialog.html", { I18N_JSON = i18nJson }))
 end
@@ -307,7 +383,16 @@ function M.newRun()
   discardChunks()
   isLoading = false
   cbCancel, cbFollowup, cbRetry = nil, nil, nil
+  replaceTarget = nil
   return runToken
+end
+
+--- Register the write-back target for `token` (see selection.captureReplaceTarget).
+--@param token  number
+--@param target table|nil
+function M.setReplaceTarget(token, target)
+  if token ~= runToken then return end
+  replaceTarget = target
 end
 
 --- Return true when `token` still refers to the current request.
@@ -332,6 +417,8 @@ function M.showLoading(token, inputText, handlers)
   ensureShown()
   webview:windowTitle("AgentMenu")
   callJS("resetDialog", inputText or "")
+  -- Booleans do not survive callJS()'s string quoting; emit the literal.
+  evalJS("setReplaceAvailable(" .. tostring(replaceTarget ~= nil) .. ");")
 end
 
 --- Append a streaming text delta.  Buffered and flushed on a short timer.
@@ -437,20 +524,13 @@ function M.show(token, text, mode, replaceFallback, selectedText, inputText, mod
   end
 
   if mode == "replace" then
-    local replaced = false
-    pcall(function()
-      local sysEl   = hs.axuielement.systemWideElement()
-      local focused = sysEl:attributeValue("AXFocusedUIElement")
-      if focused and focused:isAttributeSettable("AXSelectedText") then
-        focused:setAttributeValue("AXSelectedText", text)
-        replaced = true
+    doReplace(text, function(replaced)
+      if replaced then
+        M.hide()
+      else
+        M.show(token, text, replaceFallback, "dialog", selectedText, inputText, modelName, providerName)
       end
-    end)
-    if replaced then
-      M.hide()
-    else
-      M.show(token, text, replaceFallback, "dialog", selectedText, inputText, modelName, providerName)
-    end
+    end, true)
     return
   end
 

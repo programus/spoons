@@ -42,6 +42,8 @@ local hotkey       = nil
 local chooser      = nil
 ---@type string|nil
 local capturedSelection = nil   -- selection captured before the chooser took focus
+---@type table|nil
+local capturedReplaceTarget = nil  -- ditto, for writing the answer back (see selection.lua)
 
 -- Lazy-load lib modules after spoon path is known
 ---@type any
@@ -81,7 +83,7 @@ local log = hs.logger.new("AgentMenu", "debug")
 --- Execute a named action with the given pre-resolved selected text.
 --@param actionName  string
 --@param selectedText string|nil
-local function runAction(actionName, selectedText)
+local function runAction(actionName, selectedText, replaceTarget)
   log.d("runAction: '" .. tostring(actionName) .. "'  selectedText=" .. tostring(selectedText and #selectedText .. " chars" or "nil"))
   local act = cfg._actionByName[actionName]
   if not act then
@@ -95,6 +97,11 @@ local function runAction(actionName, selectedText)
   local sel  = (selectedText and selectedText ~= "") and selectedText or nil
   local clip = act._usesClipboard and hs.pasteboard.getContents() or nil
   local builtins = { selection = sel, clipboard = clip }
+
+  --    The replace target has to be captured while the source field still has
+  --    focus, which is *before* this function runs on the chooser paths — so
+  --    callers pass it in.  Capture here only for callers that did not.
+  replaceTarget = replaceTarget or selection.captureReplaceTarget(sel)
 
   -- 2. Ask for the user-defined parameters.  Native chooser by default; the
   --    HTML form only for actions that declare a multiline parameter, since
@@ -126,6 +133,7 @@ local function runAction(actionName, selectedText)
     --    the token, so a superseded or cancelled request can never paint into
     --    the window that now belongs to a newer one.
     local token = resultUI.newRun()
+    resultUI.setReplaceTarget(token, replaceTarget)
 
     -- Cancellation: `activeFlag` always points at the in-flight attempt's flag,
     -- while each attempt's callbacks close over their own copy.
@@ -221,6 +229,7 @@ function obj:configure(rawConfig)
   cfg = configLib.loadConfig(rawConfig)
   templates.setLang(cfg.lang)
   resultUI.setTemplates(templates)
+  resultUI.setSelection(selection)
   paramDialog.setTemplates(templates)
   paramChooser.setTemplates(templates)
   return self
@@ -261,7 +270,9 @@ function obj:start()
 
     popup.setOnAction(function(actionName)
       local text = selection.getSelectedText()
-      runAction(actionName, text)
+      -- The quick-menu is an hs.canvas and never takes keyboard focus, so the
+      -- source field is still focused: capture the write-back target now.
+      runAction(actionName, text, selection.captureReplaceTarget(text))
     end)
 
     selectionWatcher = selection.watchSelection(
@@ -298,16 +309,18 @@ function obj:start()
       -- One instance, built once.  The selection is captured by the hotkey
       -- handler (before the chooser takes focus) and read back here.
       chooser = hs.chooser.new(function(choice)
-        local text = capturedSelection
-        capturedSelection = nil
+        local text   = capturedSelection
+        local target = capturedReplaceTarget
+        capturedSelection, capturedReplaceTarget = nil, nil
         if not choice then return end
-        runAction(choice.subText, text)
+        runAction(choice.subText, text, target)
       end)
       chooser:choices(hotkeyActions)
       chooser:placeholderText(templates.t("CHOOSER_PLACEHOLDER"))
 
       hotkey = hs.hotkey.bind(hkCfg.mods, hkCfg.key, function()
         capturedSelection = selection.getSelectedText()
+        capturedReplaceTarget = selection.captureReplaceTarget(capturedSelection)
         chooser:show()
       end)
     end
@@ -331,7 +344,7 @@ function obj:stop()
     chooser:delete()
     chooser = nil
   end
-  capturedSelection = nil
+  capturedSelection, capturedReplaceTarget = nil, nil
   if popup then popup.destroy() end
   if paramChooser then paramChooser.destroy() end
   if resultUI then resultUI.destroy() end
@@ -357,16 +370,18 @@ function obj:bindHotkeys(mapping)
       end
       if chooser then chooser:delete() end
       chooser = hs.chooser.new(function(choice)
-        local text = capturedSelection
-        capturedSelection = nil
+        local text   = capturedSelection
+        local target = capturedReplaceTarget
+        capturedSelection, capturedReplaceTarget = nil, nil
         if not choice then return end
-        runAction(choice.subText, text)
+        runAction(choice.subText, text, target)
       end)
       chooser:choices(acts)
       chooser:placeholderText(templates.t("CHOOSER_PLACEHOLDER"))
 
       hotkey = hs.hotkey.bind(mods, key, function()
         capturedSelection = selection.getSelectedText()
+        capturedReplaceTarget = selection.captureReplaceTarget(capturedSelection)
         chooser:show()
       end)
     end

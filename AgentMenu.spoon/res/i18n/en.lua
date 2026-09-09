@@ -27,4 +27,13 @@ return {
   COPIED_ALERT         = "\226\156\147 Copied to clipboard",
   ERROR_PREFIX         = "Error",
   INCOMPLETE_WARNING   = "The response may be incomplete",
+
+  -- result_dialog.html — write the answer back over the original selection
+  REPLACE_LABEL        = "Replace",
+  REPLACE_TITLE        = "Replace the selected text with this answer",
+  REPLACE_BUSY_LABEL   = "Replacing\226\128\166",
+  REPLACE_CONFIRM_LABEL = "\226\156\147 Replaced",
+  REPLACED_ALERT       = "\226\156\147 Selection replaced",
+  REPLACE_STALE_ALERT  = "The text changed \226\128\148 not replaced (copy it instead)",
+  REPLACE_FAILED_ALERT = "Could not replace the selection",
 }

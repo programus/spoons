@@ -27,4 +27,13 @@ return {
   COPIED_ALERT         = "✓ 已复制到剪贴板",
   ERROR_PREFIX         = "出错了",
   INCOMPLETE_WARNING   = "响应可能不完整",
+
+  -- result_dialog.html — 把回答写回原来的选区
+  REPLACE_LABEL        = "替换原文",
+  REPLACE_TITLE        = "用这段回答替换选中的文字",
+  REPLACE_BUSY_LABEL   = "替换中…",
+  REPLACE_CONFIRM_LABEL = "\226\156\147 \229\183\178\230\155\191\230\141\162",
+  REPLACED_ALERT       = "✓ 已替换选中的文字",
+  REPLACE_STALE_ALERT  = "原文已改动，未做替换（请改用复制）",
+  REPLACE_FAILED_ALERT = "无法替换选中的文字",
 }
