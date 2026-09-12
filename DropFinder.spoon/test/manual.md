@@ -1,0 +1,152 @@
+# The manual pass
+
+The offline suites run `lib/` against a simulator; these sixteen steps are the
+ones that need a real Finder, real windows and a real screen.  They come from the
+end of the implementation plan.  This file records the last time each was walked
+and, more usefully, **what walking them found that the simulator could not** —
+five defects, every one of them now fixed, covered offline and mutation-gated.
+
+Before running anything against the live machine, ask one question first:
+
+```lua
+hs.caffeinate.sessionProperties().CGSSessionScreenIsLocked
+```
+
+With the screen locked, Finder resolves no windows through Accessibility
+(`app:allWindows()` returns only the desktop, `id = 0`) while AppleScript keeps
+answering correctly, so every observation is a lie in one direction or the other,
+and `hs.spaces.addSpaceToScreen` returns `true` without creating a Space.  Two
+passes were thrown away to that before the check became routine.
+
+| # | Step | Outcome |
+|---|---|---|
+| 1 | Empty state, hotkey | Both sides open at the default paths on the mouse's screen, half width each |
+| 2 | Hotkey again, Finder focused | Both parked in the corner; the app that was in front before gets focus back |
+| 3 | Hotkey again | Same windows, same paths, scroll position and selection intact |
+| 4 | Panel up, focus elsewhere, hotkey | Panel is raised and focused; floating Finder windows keep their place in the stack |
+| 5 | Cmd+T in the left pane and navigate | The tab is tracked; switching tabs re-lays out nothing |
+| 6 | Cmd+W that tab | Its path leaves the model; the pane does not move |
+| 7 | Close the right pane entirely | The left one takes the whole panel width immediately |
+| 8 | Hide, show | The right side is rebuilt at the path it was last at; both back to half width |
+| 9 | `hs.reload()`, hotkey | Both sides reattach by id — no new windows, no flicker |
+| 10 | `killall Finder`, hotkey | Both sides rebuilt from the persisted paths, all tabs |
+| 11 | Open a Finder window by double-clicking a folder | It stays floating: never moved, resized or closed, and it stays put when the panel hides |
+| 12 | Cmd+M a pane by hand, then the hotkey; then the same walk under `hideMode = "minimize"` | Both verified — see below |
+| 13 | Press the hotkey from another Space | **Verified**, after fixing what it exposed. See below |
+| 14 | Second display, then unplug it while shown | **Verified by hand.** Both panes survive and are re-laid out on a remaining display. Plugging it back in leaves them where they are — see below |
+| 15 | Focus a floating window, adopt hotkey | Its tabs merge in order into the side nearer the mouse and the source window closes.  Live three-tab merge ended with model and Finder in exact agreement (`49085, 49087, 49089, 49090, 49092, 49103, 49104, 49105`) and no `is gone` line in the log |
+| 16 | `spoon.DropFinder:stop()` | Both sides come back on screen, nothing left in the Dock, hotkeys dead |
+
+## Step 12 under `hideMode = "minimize"`, measured
+
+Mouse screen `ARZOPA` (`-2048,144 2048x1250`), a floating window at
+`300,200 800x440` kept for the whole run:
+
+```
+STEP1 after show   state=shown_focused   left -2048,1082 1024x312   right -1024,1082 1024x312
+STEP2 after hide   state=hidden          both min=true              front = the app from before
+STEP3 after show   state=shown_focused   same frames, same paths
+STEP3b focus away  state=shown_unfocused
+STEP4 after raise  state=shown_focused
+```
+
+The floating window read `300,200 800x440 min=false` at every one of those five
+snapshots, and Finder's own z-order (`id of every window`) was the same before
+the show and after the raise — the raise lifted the two panes without lifting it.
+
+## What the live pass found
+
+Five things the simulator agreed with and the machine did not:
+
+1. **`raise()` lifted both panes over the floating window** the user was working
+   in.  Raising the sibling first and focusing the target last fixes the order.
+2. **`hide()` handed focus back by activating the previous *app***, which lifted
+   that app's key window over the floating Finder window.  It now focuses the
+   remembered *window* and only falls back to the app.
+3. **A brand-new tab is briefly invisible to both views** — not yet in
+   `id of every window`, and Accessibility only ever shows the active one — so a
+   reconcile in that gap deleted the tab that had just been made.  Adopting three
+   tabs in a row lost the middle one.  Hence the fresh-id grace, and hence its
+   length: one adopt round takes 1.5–2s in the hand and the reconcile that has to
+   keep the tab is at the top of the *next* round.
+4. **A hand-pressed Cmd+M did not survive a reconcile.** While minimized Finder
+   puts every tab in the Accessibility tree, the remembered active one included,
+   so the "keep the remembered active tab" fallback concluded the pane was awake
+   and reset `collapsed` — which also left `stop()` with nothing to restore.
+5. **The hotkey decided from a stale answer.** `state()` reads the window table
+   the last reconcile filled in, so a reconcile that ran while nothing was
+   resolvable left it saying "hidden" about a panel sitting on the grid, and the
+   next press showed a panel that was already up.  `toggle()` now reconciles
+   first, which costs about 100ms.
+
+## Step 13, cross-Space
+
+**Verified, and it found the biggest defect of the live pass.**  This machine has
+exactly one Space per display, so the step needs one adding first:
+
+```lua
+local sp, S = hs.spaces, hs.mouse.getCurrentScreen()
+local before = sp.spacesForScreen(S)          -- remember, so the new id can be diffed out
+sp.addSpaceToScreen(S, true)                  -- private API
+sp.gotoSpace(<the new id>)                    -- then press the toggle hotkey
+sp.gotoSpace(<the original>) ; sp.removeSpace(<the new id>)
+```
+
+Two earlier attempts ran into a locked screen, where `addSpaceToScreen` reports
+success and creates nothing — hence the lock check at the top of this file.  What
+the successful run measured, on macOS 26:
+
+| Question | Answer |
+|---|---|
+| `moveWindowToSpace(pane, target)` | returns `true` and **moves nothing** — `windowSpaces` still reports the old Space, asked by window object or by id |
+| `app:allWindows()` from another Space | the **desktop and nothing else**; every pane handle comes back nil |
+| AppleScript from another Space | keeps answering: `id`/`target`/`bounds of every window`, `close window id N` |
+| `set bounds of window id N` from another Space | **works** — the window arrives on the display the rect names, joins the Space showing there, and is visible to Accessibility again |
+| a window arriving on another display | joins that display's active Space, no `hs.spaces` call involved.  Only a move that *changes display* does this |
+
+The defect: every branch of the cross-Space code was gated on having an
+`hs.window`, which is exactly what another Space does not hand over.  So the panes
+were skipped, `layout()` had nothing to lay out, and **the hotkey silently did
+nothing** — it could not even reach its own fallback.  The fix works from a window
+id, which both `hs.spaces` and AppleScript still accept, and `layout()` falls back
+to `finder.setBounds` when Accessibility has no window for a live pane.
+
+Re-verified afterwards with the fix in place, one Space added for the purpose:
+
+| Fallback | From the new Space, pressing the hotkey |
+|---|---|
+| `"activate"` (default) | both panes read `ax=false`, state reads `hidden`, the move is attempted, the lie is caught, and **one** alert appears: "the panel is on another Space and could not be moved".  Ids unchanged, nothing moved, no stray windows |
+| `"recreate"` | the panel **arrives**.  Measured: ids `49085/49087` → `50188/50190`, `windowSpaces` = the new Space for both, visible to Accessibility again, at exactly the panel frames (`{0,1017,1280,1440}` and `{1280,1017,2560,1440}` — bottom strip, half width each), paths back at `~/Downloads` and `~`, **no alert**, and exactly two Finder windows afterwards: the old pair was closed, nothing stray left behind |
+
+Both rounds left the Spaces as they were: `allSpaces()` back to one per display.
+After the extra Space was removed the panes migrated to the surviving Space with
+their layout intact.
+
+So requirement 10 is met, but only through `"recreate"`.  Anyone using several
+Spaces should set it; the README says so under limitations.
+
+## Step 14, a display going away and coming back
+
+Verified by hand, with the cable.  Unplugging the display the panel is on: both
+panes survive and end up laid out on a remaining display.  That is the whole
+expectation — `onScreensChanged` reconciles, sees a panel that is not put away,
+and re-runs `layout()` on the policy screen, so the panes are re-sized to that
+display's panel frame rather than left at whatever size macOS dropped them at.
+Nothing is closed, so paths, tabs, scroll positions and selections all survive.
+
+Plugging the display back in does **not** send the panel back to it, and that is
+by design rather than an oversight: DropFinder has no notion of a home display.
+Requirement 8 is "wherever the mouse is", and the persisted screen UUID exists
+only for the log.  On the replug the screen watcher runs the same `layout()` on
+the policy screen — which is normally still the one the mouse is on — so the
+panel stays put.  To bring it across, move the mouse to the reattached display
+and put the panel away and back out again.
+
+One rough edge worth knowing: a single press while the panel is already up takes
+the `shown_unfocused` branch, which raises and focuses without laying out, so it
+does not move the panel to the mouse's display either.  Hide-then-show is what
+moves it.
+
+The fallback path is what actually matters if `hs.spaces` is ever withdrawn, and
+that part *is* covered offline: absent, throwing, and claiming a move it did not
+make are three separate sections in `panel_spec.lua`.

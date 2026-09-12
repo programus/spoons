@@ -1,0 +1,171 @@
+# DropFinder.spoon
+
+A TotalFinder-style Visor for vanilla Finder. One hotkey drops two Finder windows in from the bottom of the screen, side by side and half width each, so you can drag files between them. Press it again to put them away.
+
+The two windows are **real Finder windows** whose position DropFinder manages. Hammerspoon cannot lift another application's windows into a floating layer, so the panel behaves like an ordinary pair of Finder windows: other windows can cover it, and losing focus does not hide it. Every Finder window that is not one of the two is left strictly alone — never moved, resized, minimized or closed.
+
+## Features
+
+- **Tri-state hotkey** — hidden → show and focus; showing but unfocused → raise and focus; showing and focused → hide
+- **Follows the mouse** — the panel appears on the screen the pointer is on
+- **Bottom-anchored** — height is a configurable fraction of the screen, floored at Finder's own minimum
+- **Exactly two managed windows** — new Finder windows are never adopted behind your back; add tabs yourself with Cmd+T
+- **Tabs survive** — every tab's path and which one was active come back after hiding, after a Hammerspoon reload, and after Finder restarts
+- **Focus handover** — hiding the panel returns focus to the app that had it before
+- **A lone side fills the panel** — close one side and the survivor expands; it goes back to half width when the other side returns
+- **Adopt** — a second hotkey merges the frontmost floating Finder window into a pane as tab(s)
+- **Cross-Space** — pressing the hotkey from another Space brings the panel to the one you are on
+
+## Requirements
+
+- macOS (developed on macOS 26 / Darwin 25.6)
+- [Hammerspoon](https://www.hammerspoon.org/) 0.9.100 or later
+- **Accessibility** permission for Hammerspoon — System Settings ▸ Privacy & Security ▸ Accessibility
+- **Automation** permission for Hammerspoon → Finder — System Settings ▸ Privacy & Security ▸ Automation. This one is requested the first time DropFinder talks to Finder, and a denial is permanent until you flip it back on by hand.
+- **TotalFinder must not be running.** See [Known limitations](#known-limitations).
+
+## Installation
+
+1. Clone or download this repository.
+2. Copy (or symlink) `DropFinder.spoon` into `~/.hammerspoon/Spoons/`.
+3. Add the following to `~/.hammerspoon/init.lua`:
+
+```lua
+hs.loadSpoon("DropFinder")
+spoon.DropFinder:configure({
+  heightRatio  = 0.4,
+  defaultPaths = { left = "~/Downloads", right = "~" },
+}):start()
+```
+
+4. Reload Hammerspoon (`Cmd+Shift+R` in the console, or menubar icon → *Reload Config*).
+
+With no arguments (`:configure({}):start()`) every field takes its default, and the hotkeys are `Ctrl+Alt+F` to toggle and `Ctrl+Alt+Shift+F` to adopt.
+
+## Configuration
+
+Copy [`config_example.lua`](config_example.lua) to `~/.hammerspoon/dropfinder_config.lua`, edit it, and pass it in:
+
+```lua
+hs.loadSpoon("DropFinder")
+local cfg = require("dropfinder_config")
+spoon.DropFinder:configure(cfg):start()
+```
+
+Every field is optional. The ones worth knowing about:
+
+| Key | Default | What it does |
+|---|---|---|
+| `heightRatio` | `0.25` | Panel height as a fraction of `screen:frame().h`. See the note below — `0.35`–`0.4` is usually better. |
+| `defaultPaths` | `{ left = "~/Downloads", right = "~" }` | Used on first run, or when every remembered path for a side has been deleted. |
+| `hideMode` | `"park"` | `"park"` moves the panes to a screen corner; `"minimize"` minimizes them into the Dock. |
+| `parkCorner` | `"bottom-right"` | Which corner `"park"` uses. |
+| `screenPolicy` | `"mouse"` | `"mouse"`, `"focused"` or `"main"`. |
+| `restoreTabs` | `true` | Rebuild every tab of a side, not just the active one. |
+| `snapBack` | `false` | Pull a pane back into place immediately if you drag it away. |
+| `adoptTarget` | `"mouse"` | Which side adopt merges into: `"mouse"`, `"lastFocused"`, `"left"`, `"right"`. |
+| `crossSpace` | `true` | Move the panel to the current Space when the hotkey is pressed elsewhere. |
+| `crossSpaceFallback` | `"activate"` | What to do if that move is refused: `"activate"` (leave it) or `"recreate"` (rebuild the side here). |
+| `hotkeys` | `Ctrl+Alt+F` / `Ctrl+Alt+Shift+F` | `toggle` and `adopt`. |
+
+Hotkeys can also be bound the `hs.spoons` way, which replaces whatever `cfg.hotkeys` set:
+
+```lua
+spoon.DropFinder:bindHotkeys({
+  toggle          = { { "ctrl", "alt" },          "f" },
+  adopt_frontmost = { { "ctrl", "alt", "shift" }, "f" },
+})
+```
+
+### About `heightRatio`
+
+Finder refuses to make a window shorter than **344px** (324px with `hideToolbar = true`). On a 1440px-tall display the default `0.25` gives 353px, just above the floor; on a 1080p display the floor is about a third of the screen and any smaller ratio is silently raised to it. If the panel looks taller than you asked for, this is why.
+
+## Usage
+
+| Action | What happens |
+|---|---|
+| **Toggle hotkey**, panel away | Both sides appear at the bottom of the screen the pointer is on, half width each, with the tabs they had. |
+| **Toggle hotkey**, panel visible but not focused | The two panes are raised and focused, and brought to the Space you are on if they are not already there. Floating Finder windows keep their stacking order. |
+| **Toggle hotkey**, panel focused | The panel is put away and focus goes back where it came from: the app you were in, or — if you brought the panel up over one of your own floating Finder windows — that window, which keeps its place in front. |
+| **Cmd+T** inside a pane | An ordinary Finder tab, tracked by DropFinder from then on. |
+| **Cmd+W** on a tab | The tab and its path are dropped from the model; the pane stays where it is. |
+| **Close a whole side** | The survivor expands to the full panel width immediately. The next show recreates the missing side and both go back to half width. |
+| **Adopt hotkey** | The frontmost floating Finder window is merged into a pane as tab(s), in order, and the source window closes. |
+| **Cmd+M** on a pane | DropFinder notices; the hotkey brings it back rather than hiding it again. |
+
+A side that was closed and is being rebuilt goes back to **the paths it was last showing**, not to `defaultPaths` — those are only the first-run fallback.
+
+## API
+
+| Function | Description |
+|---|---|
+| `spoon.DropFinder:configure(cfg)` | Validate and store config. Must be called before `start()`. Returns self. |
+| `spoon.DropFinder:start()` | Check permissions, reattach to remembered panes, bind hotkeys, subscribe to Finder's window events. Returns self. |
+| `spoon.DropFinder:stop()` | Persist, unbind, unsubscribe, and bring both panes back on screen (nothing is left parked in a corner or stranded in the Dock). Returns self. |
+| `spoon.DropFinder:bindHotkeys(mapping)` | `hs.spoons` style binding; keys are `toggle` and `adopt_frontmost`. |
+| `spoon.DropFinder.toggle()` | The tri-state hotkey action. |
+| `spoon.DropFinder.show()` / `.hide()` | The two halves of it, individually. |
+| `spoon.DropFinder.adoptFrontmost()` | Merge the frontmost floating Finder window in. Returns `started, err`. |
+| `spoon.DropFinder.state()` | `"hidden"`, `"shown_unfocused"` or `"shown_focused"`. |
+| `spoon.DropFinder.dumpState()` | The pane model as readable text — the first thing to look at when something is off. |
+| `spoon.DropFinder.resetState()` | Forget everything persisted. The panes on screen are left alone; they simply stop being managed — if the panel was put away, drag the two slivers out of the corner or close them. |
+
+Useful from a terminal:
+
+```sh
+hs -c 'spoon.DropFinder.state()'
+hs -c 'spoon.DropFinder.dumpState()'
+```
+
+## How it works
+
+Finder's tab model is only partly visible to automation, and the two halves disagree:
+
+- **AppleScript** sees every tab as a `window`, with an `id`, a `name` and a `target` (its full path). That is where paths come from.
+- **Accessibility** exposes only the **active** tab of each real window as an `AXWindow`. That is where geometry and focus come from.
+- The ids in both are the same numbers, and they are assigned by Finder — which is why they stay valid across a Hammerspoon reload, and why reattaching after one is exact rather than a guess.
+
+So a *pane* is simply a set of tab ids. An id gets into that set in exactly three ways: DropFinder created it, you pressed adopt on it, or it matches an id that was persisted. Nothing else is ever managed — that is the whole mechanism behind "floating windows are never touched".
+
+Tab **order** is read from the window's tab bar (`AXTabGroup`, titled `"tab bar"`), since AppleScript enumerates tabs by recency rather than position. Which tab is **active** is read from the same place, on demand: switching tabs emits no usable event, so there is nothing to track it with.
+
+## Known limitations
+
+Some of these are macOS refusing, not DropFinder giving up.
+
+- **TotalFinder cannot run at the same time.** It injects into Finder and turns every tab into a real window, which DropFinder misreads completely; the two also compete for the same screen area. DropFinder detects the injection and alerts, but still starts. Quit TotalFinder and restart Finder.
+- **The panel cannot float above other windows.** No API lets Hammerspoon raise another app's window into a floating level. Other windows can cover the panel; that is why losing focus does not hide it.
+- **Hiding leaves a sliver.** AppKit's `constrainFrameRect:toScreen:` keeps roughly 40px horizontally and 52px vertically of every window on the desktop, through both Accessibility and AppleScript. `hideMode = "park"` therefore leaves an approximately 40×52px corner visible. It is clickable and draggable; if you drag it, the next show puts it right. `hideMode = "minimize"` removes the sliver at the price of two Dock thumbnails and panes that only the hotkey can bring back.
+- **Per-tab back/forward history is not restorable.** Neither API exposes it, so a rebuilt tab starts with empty history. Ordinary hiding keeps it, because nothing is closed.
+- **Two tabs with the same folder name in one pane can be listed in the wrong order.** The tab bar only reports basenames, so identical names cannot be told apart. No path is ever lost or duplicated — paths come from ids — only the order of those two entries may be wrong.
+- **Right after `killall Finder`** macOS restores Finder's pre-crash windows with fresh ids. DropFinder correctly refuses to adopt them, so for a moment you may see four panel-sized windows: two floating leftovers and the two rebuilt panes. Close the leftovers.
+- **The first press after Finder restarts is slow.** A Finder that has just relaunched and has never been activated accepts new windows but cannot address them, and answers `id of every window` with nothing at all. DropFinder notices, activates Finder once — the same thing `open -a Finder` does — takes back the windows it could not use, and tries again, which takes a few seconds. During those seconds the panel may briefly come up one side at a time.
+- **Adopt rebuilds, it does not move.** Merged tabs keep their paths and order, but lose scroll position, selection and history. To read a tab's path the tab has to be the active one, so during a merge you will see the source window flick through its tabs left to right. `Window ▸ Merge All Windows` is deliberately not used: it is a global action that would swallow the other pane and every floating window too. If a tab cannot be recreated, adopt stops there — the tabs already moved stay in the pane, the rest stay in the source window, and nothing is lost.
+- **Cross-Space works, but not through `hs.spaces`.** Measured on macOS 26 with Spaces created for the purpose: `hs.spaces.moveWindowToSpace` returns `true` and moves nothing, and `windowSpaces` keeps reporting the Space the window was already on. DropFinder checks rather than believes, so the claim is caught and the panel falls back per `crossSpaceFallback`. **If you use several Spaces, set `crossSpaceFallback = "recreate"`** — it closes the panes and reopens them at the same paths on the Space you are standing on, which does work, at the cost of scroll position and selection. The default `"activate"` leaves the panel where it is and tells you once.
+  What made this invisible for a while is worth knowing, because it shapes what the panel can do at all: a window on a Space its display is not currently showing is **absent from Accessibility entirely** — `Finder:allWindows()` answers with the desktop and nothing else — while AppleScript keeps listing every tab, its path and its bounds. So the panes are still tracked from another Space, but there is no `hs.window` to act on. Everything DropFinder does from there goes by window id: reading the Space, closing a tab, and `set bounds`, which is how a pane on another *display* is fetched without any Space call at all (a window that arrives on a display joins the Space showing there).
+- **A reattached display does not reclaim the panel.** There is no notion of a home display: the panel goes where the mouse is when you show it. Unplugging the display it is on is handled — both panes survive and are re-laid out on a remaining display, at that display's panel size, with nothing closed. Plugging the display back in leaves them where they are; move the mouse across and put the panel away and back out to bring it over. A single press while the panel is already up raises and focuses it without moving it.
+- **The sidebars stay where Finder puts them.** TotalFinder mirrors the right-hand window so that the two sidebars sit on the outer edges and the drop targets face each other across a narrow gap. That is not a Finder setting — TotalFinder achieves it by injecting code into Finder. From outside, the only vanilla lever is each window's AppleScript `sidebar width`, and collapsing the right pane's sidebar to 0 hides its places list rather than moving it, so DropFinder leaves the sidebars alone.
+- **A rebuild flickers.** When a side is rebuilt with several tabs, they are created after the panel is already on screen, so the active tab flicks through them for a few hundred ms. Ordinary show/hide does not do this.
+
+## Directory structure
+
+```
+DropFinder.spoon/
+  init.lua              lifecycle, hotkeys, dependency injection, public API
+  config_example.lua    annotated configuration reference
+  docs.json             spoon metadata
+  lib/config.lua        validation and default merging
+  lib/geometry.lua      frame maths, applyFrame, minimum-height measurement
+  lib/finder.lua        every Finder read and write (AppleScript + AX)
+  lib/panel.lua         the pane model, rebuilding, show/hide/raise/adopt
+  lib/store.lua         hs.settings persistence
+  lib/watchers.lua      window filter, application and screen watchers, shutdown hook
+  test/                 offline test suite — see test/README.md
+```
+
+`lib` modules never require each other; `init.lua` injects their dependencies. The tests run under plain `luajit` against a simulator of Finder and AppKit, so they need neither Hammerspoon nor a real Finder: `test/run.sh`. What has to be checked against a real Finder instead is in `test/manual.md`, which also records what the last live pass measured and the five defects it found.
+
+## License
+
+MIT
