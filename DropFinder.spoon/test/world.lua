@@ -34,6 +34,7 @@ function W.new(screens, opts)
     timers    = {},
     log       = {},
     finderRunning = true,
+    finderPid = 4321,            -- changes when the Finder process restarts
   }
 
   -- ── clock and timers (drained explicitly, so tests are deterministic) ────
@@ -175,6 +176,7 @@ function W.new(screens, opts)
     -- whose Space the window belongs to (measured).
     function o:screen() return world.screenOfRW(rw) end
     o._rw = rw
+    o._tab = tabIndex
     return o
   end
   world.mkwin = mkwin
@@ -253,6 +255,16 @@ function W.new(screens, opts)
     rw.tabs[#rw.tabs + 1] = { id = world.nextId, path = path }
     rw.active = #rw.tabs
     return rw.tabs[#rw.tabs].id
+  end
+
+  --- Measured on a pane holding fourteen tabs: File > New Tab appended the tab
+  --- without selecting it, so the pane's active tab stayed where it was and the
+  --- new tab was never in the AX tree at all.
+  function world.addBackgroundTab(rw, path)
+    local wasActive = rw.active
+    local id = world.addTab(rw, path)
+    rw.active = wasActive
+    return id
   end
 
   --- The user dragged a tab along the tab bar.  Same tabs, same ids, new order.
@@ -365,7 +377,12 @@ function W.new(screens, opts)
   -- ── the fake finder module (same API as lib/finder.lua) ──────────────────
   local F = {}
   function F.setLogger() end
-  function F.app() return world.finderRunning and {} or nil end
+  -- The pid matters: the minted-id list is only meaningful for the Finder that
+  -- issued the ids, so a restart has to be able to show up as a new number.
+  function F.app()
+    if not world.finderRunning then return nil end
+    return { pid = function() return world.finderPid end }
+  end
   function F.ensureRunning(cb) cb(F.app()) end
   function F.automationAvailable() return true, nil end
   function F.totalFinderInjected(cb) return cb(false) end
@@ -424,6 +441,15 @@ function W.new(screens, opts)
 
   function F.axWindows()
     if not world.finderRunning then return {} end
+    -- world.axBlindRounds = n: measured against the real Finder and confirmed
+    -- through System Events, so it is Finder's AX server and not Hammerspoon --
+    -- for a while after Finder relaunches, the AX tree answers "no windows" while
+    -- AppleScript happily lists them all.  Counted down rather than latched,
+    -- because what the code under test has to do is wait it out.
+    if (world.axBlindRounds or 0) > 0 then
+      world.axBlindRounds = world.axBlindRounds - 1
+      return {}
+    end
     local out = {}
     for _, rw in ipairs(world.windows) do
       if not world.axCanSee(rw) then
@@ -458,6 +484,12 @@ function W.new(screens, opts)
     local rw = win._rw
     -- Measured: a single-tab window has no tab bar at all.
     if not rw or #rw.tabs < 2 then return {}, nil end
+    -- Measured: only the active tab is in the AX tree, so a handle to any other
+    -- tab of the window is detached -- it still answers with its id and the
+    -- window's frame, but it has no children, and therefore no tab bar.  That is
+    -- exactly the handle windowCreated hands over for a tab Finder added without
+    -- selecting it.
+    if not rw.minimized and win._tab and win._tab ~= rw.active then return {}, nil end
     local titles = {}
     for _, t in ipairs(rw.tabs) do titles[#titles + 1] = basename(t.path) end
     return titles, rw.active
@@ -508,7 +540,10 @@ function W.new(screens, opts)
     end
     -- world.failNewTabAt = n makes the n-th call fail, for the give-up paths.
     world.newTabCalls = (world.newTabCalls or 0) + 1
-    if world.failNewTabAt == world.newTabCalls then
+    -- world.failNewTabFor = path fails that one path however often it is tried:
+    -- a transient miss is worth retrying, a path Finder will never accept must
+    -- not hold up the tabs queued behind it.
+    if world.failNewTabAt == world.newTabCalls or world.failNewTabFor == path then
       return hs.timer.doAfter(0.15, function() cb(nil, "New Tab was not available") end)
     end
     local wasActive = rw.active

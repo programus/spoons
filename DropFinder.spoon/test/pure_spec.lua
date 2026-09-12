@@ -32,8 +32,9 @@ ck("defaults: hideMode park", c.hideMode == "park", c.hideMode)
 ck("defaults: parkCorner bottom-right", c.parkCorner == "bottom-right")
 ck("defaults: parkMaxVisible 5000", c.parkMaxVisible == 5000)
 ck("defaults: toggle hotkey ctrl+alt f",
-   c.hotkeys.toggle.key == "f" and #c.hotkeys.toggle.mods == 2)
-ck("defaults: adopt hotkey present", c.hotkeys.adopt ~= nil)
+   c.hotkeys.toggle[1].key == "f" and #c.hotkeys.toggle[1].mods == 2)
+ck("defaults: one toggle hotkey", #c.hotkeys.toggle == 1, #c.hotkeys.toggle)
+ck("defaults: adopt hotkey present", c.hotkeys.adopt[1] ~= nil)
 ck("~ expands to $HOME", c.defaultPaths.right == HOME, c.defaultPaths.right)
 ck("~/Downloads resolves", c.defaultPaths.left == HOME .. "/Downloads", c.defaultPaths.left)
 
@@ -44,8 +45,30 @@ ck("unspecified boolean keeps its default", c2.restoreTabs == true)
 ck("heightRatio override", c2.heightRatio == 0.4)
 
 local c3 = configLib.loadConfig({ hotkeys = { adopt = false } })
-ck("hotkeys.adopt = false opts out", c3.hotkeys.adopt == nil)
-ck("hotkeys.toggle still defaulted", c3.hotkeys.toggle ~= nil)
+ck("hotkeys.adopt = false opts out", #c3.hotkeys.adopt == 0)
+ck("hotkeys.toggle still defaulted", #c3.hotkeys.toggle == 1)
+
+-- One action, several keys: the point is that nothing is dropped and the order
+-- is kept, so start() can bind them all and stop() can find them all again.
+local c4 = configLib.loadConfig({ hotkeys = { toggle = {
+  { mods = { "alt" }, key = "`" },
+  { mods = { "ctrl", "alt" }, key = "f" },
+} } })
+ck("a list of hotkeys is kept whole", #c4.hotkeys.toggle == 2, #c4.hotkeys.toggle)
+-- Indexed defensively: a mutant that drops an entry should fail this check, not
+-- crash the suite before it can print its tally.
+ck("in the order given", (c4.hotkeys.toggle[1] or {}).key == "`"
+   and (c4.hotkeys.toggle[2] or {}).key == "f")
+ck("the other action still defaults", #c4.hotkeys.adopt == 1)
+local c5 = configLib.loadConfig({ hotkeys = { toggle = { mods = { "alt" }, key = "`" } } })
+ck("a single hotkey still works, as a list of one",
+   #c5.hotkeys.toggle == 1 and c5.hotkeys.toggle[1].key == "`")
+-- loadConfig hands back tables of its own: handing out the default spec itself
+-- would let anything that edited one config's hotkeys change the next one loaded.
+-- Compared between two configs that both took the default, since an opted-out
+-- action has no spec to compare.
+ck("the default spec is copied, not handed out",
+   c.hotkeys.adopt[1] ~= c2.hotkeys.adopt[1])
 
 ck("nonexistent defaultPath degrades to a real directory",
    configLib.loadConfig({ defaultPaths = { left = "/nope/nope" } }).defaultPaths.left == HOME)
@@ -61,6 +84,11 @@ for _, bad in ipairs({
   { crossSpaceFallback = "nope" }, { adoptTarget = "middle" }, { bottomGap = -5 },
   { restoreTabs = "yes" }, { hotkeys = { toggle = { key = "f" } } },
   { hotkeys = "ctrl-f" }, { defaultPaths = "somewhere" }, { settleDelay = -1 },
+  -- An empty list reads as "bound to nothing", which is what `false` says out
+  -- loud; taken quietly it looks like a hotkey that does not work.
+  { hotkeys = { toggle = {} } },
+  -- One bad entry in a list must not pass because its neighbours are fine.
+  { hotkeys = { adopt = { { mods = { "alt" }, key = "`" }, { mods = { "alt" } } } } },
 }) do
   local k = next(bad)
   ck("rejects " .. k .. " = " .. tostring(bad[k]), not pcall(configLib.loadConfig, bad))
@@ -174,6 +202,57 @@ ck("pickScreen main", geometry.pickScreen("main"):name() == "Solo")
 ck("pickScreen focused falls back when nothing is focused",
    geometry.pickScreen("focused"):name() == "Solo")
 
+-- ── finder (the replies AppleScript actually gives) ───────────────────────
+-- finder.lua is the only module that talks to Finder, so almost none of it can
+-- be tested offline.  What can is the part that has bitten hardest: reading a
+-- new window's id out of whatever Finder says back.
+section("finder")
+
+local function finderWith(reply)
+  hs = select(1, S.install(S.REAL_SCREENS, { applescript = reply }))
+  return dofile(R .. "finder.lua")
+end
+local function onMake(text)
+  -- The snapshot query comes first and must answer something; only the reply to
+  -- the window-making script is what each case is about.
+  return function(src)
+    if src:find("make new Finder window", 1, true) then return true, text end
+    return true, "77\tDownloads\t" .. HOME .. "/Downloads\n"
+  end
+end
+
+local fOK = finderWith(onMake("77\n91\n"))
+local newId, newErr = fOK.openWindowAt(HOME)
+ck("openWindowAt returns the id that appeared", newId == 91,
+   tostring(newId) .. " / " .. tostring(newErr))
+
+-- Measured right after `killall Finder`: `make new Finder window` works, the id
+-- is even readable, but the window cannot be addressed to set its target.  The id
+-- has to come back regardless, because it is the only way to close the window
+-- that was left behind.
+local fStray = finderWith(onMake(
+  "STRAY|51843|Finder got an error: Can't set window id 51843 to alias|"))
+local sId, sErr, stray = fStray.openWindowAt(HOME)
+ck("a window Finder would not target is not returned as an id", sId == nil, tostring(sId))
+ck("the failure says so", type(sErr) == "string" and sErr:find("not accept") ~= nil, sErr)
+ck("and the stray id comes back to be closed", stray == 51843, tostring(stray))
+
+-- The worse half of the same state, and the one that left two untargeted windows
+-- on screen after every Finder restart: `id of nw` raises as well, so the only
+-- place the number exists is inside the error from coercing the window to text.
+local fSpec = finderWith(onMake(
+  "STRAY|-1|Finder got an error: Can't set Finder window id -1 to alias \"HD:x:\"|" ..
+  "Finder got an error: Can't make \194\171class brow\194\187 id 51900 of application " ..
+  "\"Finder\" into type text."))
+local _, _, stray2 = fSpec.openWindowAt(HOME)
+ck("the id is dug out of the object specifier", stray2 == 51900, tostring(stray2))
+
+-- And the id must come from the specifier only.  "window id -1" in the message
+-- is not an id, and neither is anything in the path.
+local fNone = finderWith(onMake("STRAY|-1|Finder got an error: Can't set window id -1|"))
+local _, _, stray3 = fNone.openWindowAt(HOME)
+ck("no specifier, no invented id", stray3 == nil, tostring(stray3))
+
 -- ── store ─────────────────────────────────────────────────────────────────
 section("store")
 local store = load("store")
@@ -198,6 +277,39 @@ ck("minHeight survives",
    ld.minHeight.withToolbar == 344 and ld.minHeight.withoutToolbar == 324)
 ck("a pane with no ids keeps its rebuild paths",
    #ld.panes.right.tabIds == 0 and ld.panes.right.paths[1] == "/Applications")
+
+-- The undrained half of a rebuild recipe.  paths can only ever describe tabs
+-- that exist (it is index-aligned with tabIds), so without this the recipe on
+-- disk shrinks to one folder the moment a pane is rebuilt -- measured as 8
+-- remembered tabs coming back as 5.
+local q = store.blank()
+q.panes.left = { tabIds = { 51859 }, paths = { "/private/tmp" },
+                 activePath = "/private/tmp",
+                 pending = { paths = { "/Applications", "/usr" }, activePath = "/usr" } }
+store.save(q)
+local lq = store.load()
+ck("a queued rebuild survives a restart", lq.panes.left.pending ~= nil
+   and #lq.panes.left.pending.paths == 2, lq.panes.left.pending)
+ck("in order", lq.panes.left.pending.paths[2] == "/usr", lq.panes.left.pending.paths[2])
+ck("with the tab that was meant to end up active",
+   lq.panes.left.pending.activePath == "/usr")
+ck("and the tabs that do exist are still aligned",
+   #lq.panes.left.tabIds == 1 and lq.panes.left.paths[1] == "/private/tmp")
+
+local emptyQ = store.blank()
+emptyQ.panes.left = { tabIds = {}, paths = { "/tmp" },
+                      pending = { paths = { "", 7 } } }
+store.save(emptyQ)
+ck("a queue of nothing usable is no queue at all",
+   store.load().panes.left.pending == nil)
+
+-- A state written before pending existed has to keep working: it is what is on
+-- the user's disk right now.
+hs.settings.set("DropFinder.state.v1", { version = 1, lastSide = "left", minHeight = {},
+  panes = { left = { tabIds = { 5 }, paths = { "/tmp" } }, right = { tabIds = {}, paths = {} } } })
+local old1 = store.load()
+ck("a state from before queues were written is still valid",
+   old1.panes.left.paths[1] == "/tmp" and old1.panes.left.pending == nil)
 
 local ragged = store.blank()
 ragged.panes.left = { tabIds = { 1, 2, 3 }, paths = { "/tmp" } }

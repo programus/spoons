@@ -47,6 +47,16 @@ local axById = {}             -- refreshed by reconcile(); id -> hs.window
 local freshIds = {}           -- id -> true for tabs we just made; see markFresh
 ---@type boolean
 local spacesWarned = false    -- the cross-Space alert is shown once per session
+---@type table
+local draining = { left = false, right = false }   -- a tab restore is in flight
+---@type boolean
+local restoresOff = false     -- set by restoreAll(): stop() means stop, including
+                              -- a drain that a show() already in flight is about
+                              -- to start.  Cleared by the next show().
+---@type function
+local writeState              -- defined in the persistence section below; the tab
+                              -- restore writes each tab down as it lands, and that
+                              -- is a long way above where persisting lives
 
 function M.setDeps(deps)
   finder   = deps.finder
@@ -70,7 +80,17 @@ local function newPane(side)
     parked     = nil,  -- where parking actually landed; also used to tell our
                        -- own park apart from a user drag
     pending    = nil,  -- { paths = string[], activePath = s }: tabs still to be
-                       -- recreated, drained by completeRebuilds()
+                       -- recreated, drained by completeRebuilds().  Persisted:
+                       -- it is the only place the undrained half of a rebuild
+                       -- recipe lives, and a rebuild can be interrupted by
+                       -- anything from a blind AX tree to hs.reload().
+    minted     = {},   -- integer[]: ids this side created and has not seen
+                       -- closed.  Not the model -- provenance.  reconcile drops
+                       -- an id as soon as Finder stops listing it, and Finder
+                       -- does that for reasons that have nothing to do with the
+                       -- window being gone; an id dropped and forgotten is a
+                       -- window left in the panel's slot that nothing may touch.
+                       -- Persisted, and cleared when Finder dies with the ids.
   }
 end
 
@@ -133,6 +153,112 @@ end
 
 local function isLive(side)
   return #panes[side].tabIds > 0
+end
+
+-- ── Provenance: the ids we minted ──────────────────────────────────────────
+--
+-- reconcile() drops an id the moment Finder stops listing it, which is right for
+-- the model and wrong for the window: Finder omits windows for reasons that have
+-- nothing to do with them being closed (measured for minutes on end after a
+-- relaunch, and again while a display's Space was elsewhere).  A dropped id was
+-- also a forgotten id, and a forgotten id is a window *we made*, sitting in the
+-- panel's own slot, that requirement 4 then forbids anyone from moving or
+-- closing.  Two of those were left on screen for an hour.
+--
+-- So every id that enters a pane is written down here as well, and a rebuild
+-- checks the list before it makes anything new.  This does not weaken
+-- requirement 4: the guarantee there is about windows DropFinder did not create,
+-- and membership in this list is exactly the proof that it did.
+local MINTED_CAP = 32
+-- Finder hands ids out per process, so the list is only meaningful for the
+-- process that issued them.  Termination clears it -- but Finder can also be
+-- restarted while Hammerspoon is not running, and then a fresh window could wear
+-- a remembered number.  The pid is the check that costs nothing.
+local mintedPid = nil
+
+local function finderPid()
+  local app = finder.app()
+  if not app or type(app.pid) ~= "function" then return nil end
+  local ok, pid = pcall(app.pid, app)
+  return ok and pid or nil
+end
+
+local function mint(side, id)
+  if not id then return end
+  local list = panes[side].minted
+  for _, v in ipairs(list) do
+    if v == id then return end
+  end
+  list[#list + 1] = id
+  while #list > MINTED_CAP do table.remove(list, 1) end
+  mintedPid = finderPid()
+end
+
+--- Drop everything one Finder process told us about its windows.  The numbers
+--- mean nothing outside the process that issued them; the paths are half of the
+--- rebuild recipe and stay, which is what lets the next show() put the side back.
+---@param pane table
+---@param side string
+local function forgetPaneIds(pane, side)
+  pane.tabIds    = {}
+  pane.activeId  = nil
+  pane.frame     = nil
+  pane.collapsed = false
+  pane.origin    = nil
+  -- The queue was aimed at ids that no longer exist, but the paths in it are
+  -- still wanted.  With tabIds now empty there is no index alignment left to
+  -- keep, so they can go back into pathList -- and pathList without ids is
+  -- exactly what the store keeps whole.
+  if pane.pending then
+    for _, path in ipairs(pane.pending.paths) do
+      pane.pathList[#pane.pathList + 1] = path
+    end
+    pane.activePath = pane.pending.activePath or pane.activePath
+    pane.pending = nil
+  end
+  -- The ids died with the process, so the provenance record dies with them:
+  -- keeping it would let a fresh window that happens to reuse a number be taken
+  -- for one of ours.
+  pane.minted = {}
+  draining[side] = false
+end
+
+--- Notice a Finder restart nobody told us about.  onFinderTerminated() covers the
+--- one we watched happen; this is the other one -- the pid moved while
+--- Hammerspoon was down, or the launch/terminate pair never reached us.  Ids are
+--- per process, so every number we have written down now belongs to a dead one,
+--- and a window in the new process (one macOS restored, or one the user opened)
+--- can be wearing it.  Reattaching to that number would move a window
+--- DropFinder did not create, so the numbers go and the paths stay: the panes
+--- rebuild, and whatever wears the number now stays floating (requirement 4).
+---@return boolean  false when a restart was just detected
+local function forgetIdsIfFinderChanged()
+  local pid = finderPid()
+  if not pid then return true end          -- cannot tell; leave the model alone
+  if not mintedPid then mintedPid = pid; return true end
+  if mintedPid == pid then return true end
+  log.i(string.format(
+    "Finder is a different process now (%d, was %d); its window numbers are not ours",
+    pid, mintedPid))
+  for _, side in ipairs(SIDES) do forgetPaneIds(panes[side], side) end
+  mintedPid = pid
+  return false
+end
+
+--- Drop minted ids Finder no longer lists, and the whole list if the ids came
+--- from a Finder that is no longer running.
+---@param pathOf table<integer,string>  id -> path, from finder.pathsById()
+---@return boolean  false when the list cannot be trusted at all
+local function pruneMinted(pathOf)
+  if not forgetIdsIfFinderChanged() then return false end
+  for _, side in ipairs(SIDES) do
+    local keep = {}
+    for _, id in ipairs(panes[side].minted) do
+      if pathOf[id] then keep[#keep + 1] = id end
+    end
+    panes[side].minted = keep
+  end
+  return true
 end
 
 --- { left = true|nil, right = true|nil } for the sides that currently exist.
@@ -248,6 +374,10 @@ function M.reconcile()
     log.w("reconcile: Finder reports no windows while Accessibility sees some; leaving the model alone")
     return false
   end
+
+  -- Both views agree there is a Finder to look at, so its pid is readable and
+  -- worth checking before a single id is believed.
+  forgetIdsIfFinderChanged()
 
   for _, side in ipairs(SIDES) do
     local pane = panes[side]
@@ -496,20 +626,34 @@ local function rebuildPlan(side)
     return type(p) == "string" and p ~= "" and hs.fs.attributes(p, "mode") == "directory"
   end
 
+  -- pathList holds the tabs that exist and pending.paths the rest of the same
+  -- recipe, in order, so the two concatenated are the plan -- and a rebuild that
+  -- was interrupted halfway restarts from the whole thing instead of from the
+  -- one tab that made it.
+  local recipe = {}
+  for _, p in ipairs(pane.pathList) do recipe[#recipe + 1] = p end
+  if pane.pending then
+    for _, p in ipairs(pane.pending.paths) do recipe[#recipe + 1] = p end
+  end
+  -- The remembered active tab is in the queue while a rebuild is unfinished:
+  -- pane.activePath tracks whatever tab is live right now, which during a drain
+  -- is whichever one Finder happened to make last.
+  local want = (pane.pending and pane.pending.activePath) or pane.activePath
+
   local paths, active = {}, nil
   if cfg.restoreTabs then
-    for _, p in ipairs(pane.pathList) do
+    for _, p in ipairs(recipe) do
       if isDir(p) then
         paths[#paths + 1] = p
-        if not active and p == pane.activePath then active = #paths end
+        if not active and p == want then active = #paths end
       end
     end
   else
     -- Tab restore off: one tab per side, the one that was active.
-    if isDir(pane.activePath) then
-      paths[1] = pane.activePath
+    if isDir(want) then
+      paths[1] = want
     else
-      for _, p in ipairs(pane.pathList) do
+      for _, p in ipairs(recipe) do
         if isDir(p) then paths[1] = p; break end
       end
     end
@@ -518,12 +662,48 @@ local function rebuildPlan(side)
   return paths, active or 1
 end
 
+--- Take back windows this side minted that Finder is still listing.
+-- Cheaper than rebuilding and, more to the point, the only thing that ever
+-- clears a stranded pane: a window whose id reconcile dropped while Finder was
+-- being unhelpful is otherwise left in the panel's slot for good, and the
+-- rebuild puts a second pane on top of it.  Only ids in this side's own minted
+-- list are considered, and only while no side already claims them, so nothing
+-- the user opened can be caught by this.
+---@return boolean  true when the side is live again
+local function reclaimMinted(side)
+  local pane = panes[side]
+  if #pane.minted == 0 then return false end
+  local pathOf = finder.pathsById()
+  if not pathOf then return false end
+  if not pruneMinted(pathOf) then return false end
+
+  local ids, paths = {}, {}
+  for _, id in ipairs(pane.minted) do
+    if not M.sideOfTab(id) then
+      ids[#ids + 1]     = id
+      paths[#paths + 1] = pathOf[id]
+    end
+  end
+  if #ids == 0 then return false end
+
+  pane.tabIds, pane.pathList = ids, paths
+  pane.activeId   = ids[1]
+  pane.activePath = paths[1]
+  pane.origin     = "reattach"
+  pane.collapsed  = false
+  reorderByTabBar(side)
+  log.i(string.format("reclaimed %d stranded %s window(s) (%s)", #ids, side,
+                      table.concat(ids, ", ")))
+  return true
+end
+
 --- Create whichever sides are missing, then call `cb()`.
 -- Phase 1 restores one tab per side; the remaining tabs are Phase 2.
 local function ensurePanes(cb, retried)
   local created = false
   local failed, strays = 0, {}
   for _, side in ipairs(SIDES) do
+    if not isLive(side) then reclaimMinted(side) end
     if not isLive(side) then
       local plan, activeIdx = rebuildPlan(side)
       local path = plan[1]
@@ -534,6 +714,7 @@ local function ensurePanes(cb, retried)
         pane.pathList = { path }
         pane.activeId = id
         markFresh(id)
+        mint(side, id)
         pane.origin   = "create"
         -- The pane goes on screen with its first tab only; the rest are queued
         -- for completeRebuilds() so that a cold show() is not held up by one
@@ -592,14 +773,24 @@ end
 
 -- ── Multi-tab restore (requirement 3) ──────────────────────────────────────
 
+-- How many times restoreNextTab will wait for a pane's window to reappear
+-- before it stops, and how many times one path may fail New Tab before it is
+-- given up on.  Both exist to keep a wedged Finder from turning the drain into
+-- an endless timer chain.
+local AX_BLIND_TRIES = 8
+local NEW_TAB_TRIES  = 2
+
 --- Add one queued tab to `side`, then come back for the next one.
-local function restoreNextTab(side, done)
+local function restoreNextTab(side, done, attempt)
   local pane  = panes[side]
   local queue = pane.pending
   if not queue or #queue.paths == 0 then
     pane.pending = nil
     return done()
   end
+  -- stop() calls the drain off by clearing these rather than by dropping the
+  -- queue, so the paths are still there to be persisted and rebuilt from.
+  if restoresOff or not draining[side] then return done() end
 
   -- Re-resolve the handle before every tab.  The previous New Tab changed which
   -- tab is active, and AX only has an object for the active one, so last round's
@@ -608,8 +799,24 @@ local function restoreNextTab(side, done)
   M.reconcile()
   local w = paneWindow(side)
   if not w then
-    log.w("stopped restoring tabs for the " .. side .. " pane: its window is gone")
-    pane.pending = nil
+    -- One symptom, two very different worlds, and only one of them is fatal.
+    -- Right after Finder relaunches its AX tree can answer "no windows" for
+    -- minutes while the windows are on screen -- measured, and confirmed through
+    -- System Events, so it is Finder's AX server and not Hammerspoon.  Treating
+    -- that as "the window is gone" and dropping the queue is what lost the
+    -- user's tabs: 8 remembered tabs came back as 5, and the other 3 were gone
+    -- from memory and from disk.  So wait while Finder still owns ids of ours,
+    -- and when it stops, keep the queue for the next show() to rebuild from.
+    attempt = (attempt or 0) + 1
+    if #pane.tabIds > 0 and attempt <= AX_BLIND_TRIES then
+      log.d(string.format("the %s pane's window is not in the AX tree yet; retry %d/%d",
+                          side, attempt, AX_BLIND_TRIES))
+      hs.timer.doAfter(0.2 * attempt, function() restoreNextTab(side, done, attempt) end)
+      return
+    end
+    log.w(string.format(
+      "stopped restoring tabs for the %s pane: no window answering; keeping %d path(s) for the next rebuild",
+      side, #queue.paths))
     return done()
   end
 
@@ -625,11 +832,32 @@ local function restoreNextTab(side, done)
         pane.pathList[#pane.pathList + 1] = path
       end
       markFresh(id)
+      mint(side, id)
       pane.activeId = id
+      queue.tries   = nil
+      -- Written down per tab, and without a reconcile because the top of this
+      -- function just did one.  The point is that the queue on disk always names
+      -- the tabs that do *not* exist yet: a reload halfway through a rebuild then
+      -- carries on from here instead of making a second copy of everything it had
+      -- already made.
+      writeState(false)
       log.i(string.format("restored tab %d (%s) in the %s pane", id, path, side))
     else
-      log.w(string.format("could not restore tab %s in the %s pane: %s",
-                          path, side, tostring(err)))
+      -- The path was taken off the queue to be used; a failure has to put it
+      -- back or it is lost, which is the second half of the 8-tabs-became-5
+      -- measurement.  New Tab misses transiently (the menu is not there yet
+      -- while Finder is still waking), so retry it -- but bounded, because a
+      -- path Finder will never accept must not stall the tabs behind it.
+      queue.tries = (queue.tries or 0) + 1
+      if queue.tries <= NEW_TAB_TRIES then
+        table.insert(queue.paths, 1, path)
+        log.w(string.format("could not restore tab %s in the %s pane (%s); retry %d/%d",
+                            path, side, tostring(err), queue.tries, NEW_TAB_TRIES))
+      else
+        queue.tries = nil
+        log.w(string.format("gave up on tab %s in the %s pane: %s",
+                            path, side, tostring(err)))
+      end
     end
     restoreNextTab(side, done)
   end)
@@ -663,14 +891,20 @@ end
 -- active tab flickers through the ones being created, and it is only paid on a
 -- rebuild -- Finder restarted, or that side was closed.
 local function completeRebuilds()
+  if restoresOff then return end
   for _, side in ipairs(SIDES) do
     local pending = panes[side].pending
-    if pending then
+    -- The guard matters because every show() calls this, and a queue left over
+    -- from an interrupted rebuild is picked up by the next press: two chains on
+    -- one queue would interleave their New Tab presses in the same window.
+    if pending and not draining[side] then
       local s, want = side, pending.activePath
+      draining[s] = true
       restoreNextTab(s, function()
+        draining[s] = false
         M.reconcile()
         selectActiveTab(s, want)
-        M.persistNow()    -- reconciles first
+        M.persistNow()    -- reconciles first; writes whatever queue is left
       end)
     end
   end
@@ -935,6 +1169,7 @@ end
 -- pane to exist.  It is called before completeRebuilds(), which deliberately
 -- runs on its own for the next few hundred ms.
 function M.show(done)
+  restoresOff = false     -- asking for the panel asks for its tabs too
   capturePrevApp()
   M.reconcile()
   local screen = geometry.pickScreen(cfg.screenPolicy)
@@ -945,6 +1180,10 @@ function M.show(done)
       moveToCurrentSpace(screen, function()
         layout(screen)
         M.raise()
+        -- Before completeRebuilds() on purpose: the panel should be usable now,
+        -- not once every remembered tab exists.  Safe to write here only because
+        -- persistNow() writes pane.pending as well, so what lands on disk is the
+        -- whole recipe -- one tab plus the queue -- rather than the one tab.
         M.persistNow()
         if done then done() end
         completeRebuilds()
@@ -1163,6 +1402,7 @@ function M.adoptFrontmost()
           pane.pathList[#pane.pathList + 1] = path
         end
         markFresh(newId)
+        mint(side, newId)
         pane.activeId = newId
         -- Only now, with the tab safely recreated, may it disappear from the
         -- source.  Nothing is closed before its replacement exists, so a
@@ -1198,12 +1438,14 @@ function M.panes() return panes end
 --- floating unless it is demonstrably a *tab* inside a pane we already own.
 ---
 --- The test cannot use frames alone, because an inactive tab reports stale
---- bounds.  It does not have to: a brand-new tab is always the active tab of its
---- real window, so it is the AX window, its frame is current, and the pane's
---- previously-active tab has just dropped out of the AX tree.  Two independent
---- signals must agree:
----   1. the new window sits exactly where the pane sits, and
----   2. its tab bar still lists one of the pane's known folders.
+--- bounds.  It does not have to: the new window sits exactly where the pane
+--- sits, and one of three things corroborates that it is a tab of it --
+---   1. its tab bar still lists one of the pane's known folders, or
+---   2. the pane's own tab bar now lists more tabs than the pane owns while the
+---      new id is nowhere in the AX tree (a tab Finder added without selecting
+---      it), or
+---   3. it has no tab bar to read and the pane's active tab just left the AX
+---      tree, which is what being replaced as the active tab looks like.
 --- Anything else -- including every window the user opens by double-clicking a
 --- folder -- is left completely alone.
 --@param win table  hs.window
@@ -1237,12 +1479,29 @@ function M.onWindowCreated(win)
       -- instead that this pane's active tab really did just leave the AX tree --
       -- which is what happens when one of its tabs is replaced as the active one.
       local paneWentInactive = pane.activeId ~= nil and axById[pane.activeId] == nil
-      if sharesTabBar or (#titles == 0 and paneWentInactive) then
+      -- Both signals above assume the new tab is the active one, which is what a
+      -- Cmd+T into a focused pane does.  Measured on a pane holding fourteen
+      -- tabs: File > New Tab put the tab in the tab bar *without selecting it*,
+      -- so the new id never entered the AX tree, its detached handle answered
+      -- with no tab bar at all, and the pane's own active tab never went
+      -- anywhere -- thirteen tabs in a row were filed as floating.
+      -- The pane's window is the witness in that case, and Accessibility can
+      -- still read it: its tab bar now lists more tabs than the pane owns.  A
+      -- window the user opened by double-clicking a folder cannot look like
+      -- this -- it leaves that count alone and arrives as an AX window of its
+      -- own -- so requiring both keeps requirement 2 intact.
+      local paneGrew = false
+      if axById[id] == nil then
+        local pw = paneWindow(side)
+        if pw then paneGrew = #finder.tabTitles(pw) > #pane.tabIds end
+      end
+      if sharesTabBar or paneGrew or (#titles == 0 and paneWentInactive) then
         local pathOf = finder.pathsById() or {}
         local path = pathOf[id] or ""
         pane.tabIds[#pane.tabIds + 1]     = id
         pane.pathList[#pane.pathList + 1] = path
         markFresh(id)
+        mint(side, id)
         pane.activeId   = id
         pane.activePath = path ~= "" and path or pane.activePath
         lastSide = side
@@ -1347,16 +1606,8 @@ end
 --- rebuild recipe, so they are kept.
 function M.onFinderTerminated()
   log.i("Finder terminated; keeping saved paths for rebuild")
-  for _, side in ipairs(SIDES) do
-    local pane = panes[side]
-    pane.tabIds   = {}
-    pane.activeId = nil
-    pane.frame    = nil
-    pane.collapsed = false
-    pane.origin   = nil
-    -- Whatever was still queued was queued against ids that no longer exist.
-    pane.pending  = nil
-  end
+  for _, side in ipairs(SIDES) do forgetPaneIds(panes[side], side) end
+  mintedPid = nil
   axById = {}
   M.persistNow()
 end
@@ -1429,7 +1680,42 @@ local function refreshActivePath(side)
   end
 end
 
---- Write the current model to hs.settings.
+--- Write the model down as it stands, with no Finder I/O of its own.
+-- `refreshActive` asks the tab bar which tab is showing; the tab restore passes
+-- false, because mid-rebuild the active tab is whichever one Finder made last and
+-- the one that matters is remembered in pane.pending.activePath.
+--@param refreshActive boolean
+function writeState(refreshActive)
+  if not cfg or not cfg.persist then return end
+  local st = store.blank()
+  st.minHeight = minHeight
+  st.lastSide  = lastSide
+  for _, side in ipairs(SIDES) do
+    if refreshActive then refreshActivePath(side) end
+    local pane = panes[side]
+    st.panes[side] = {
+      tabIds     = pane.tabIds,
+      paths      = pane.pathList,
+      activePath = pane.activePath,
+      -- Written, not derived: pathList is index-aligned with tabIds, so it can
+      -- only ever hold the tabs that exist.  Without this the recipe on disk is
+      -- truncated to the pane's first tab the moment show() lays the panel out
+      -- -- before a single queued tab has been made -- and anything that then
+      -- interrupts the drain loses the rest for good.
+      pending    = pane.pending and #pane.pending.paths > 0 and {
+        paths      = pane.pending.paths,
+        activePath = pane.pending.activePath,
+      } or nil,
+      -- Written for the same reason as pending, one step further out: this is
+      -- what lets a *later* run take back a window an earlier one stranded.
+      minted     = pane.minted,
+    }
+  end
+  st.finderPid = mintedPid
+  store.save(st)
+end
+
+--- Read the world, then write the current model to hs.settings.
 function M.persistNow()
   if not cfg or not cfg.persist then return end
   -- The model's paths are only as fresh as the last reconcile(), and persisting
@@ -1441,19 +1727,7 @@ function M.persistNow()
   -- died: reconcile() leaves the model alone when it cannot read a snapshot.
   -- The callers that used to reconcile immediately before this no longer do.
   M.reconcile()
-  local st = store.blank()
-  st.minHeight = minHeight
-  st.lastSide  = lastSide
-  for _, side in ipairs(SIDES) do
-    refreshActivePath(side)
-    local pane = panes[side]
-    st.panes[side] = {
-      tabIds     = pane.tabIds,
-      paths      = pane.pathList,
-      activePath = pane.activePath,
-    }
-  end
-  store.save(st)
+  writeState(true)
 end
 
 --- Load persisted state.  No Finder I/O: this has to be safe to call the moment
@@ -1474,8 +1748,15 @@ function M.loadState()
     pane.tabIds     = sp.tabIds
     pane.pathList   = sp.paths
     pane.activePath = sp.activePath
+    -- A rebuild interrupted by hs.reload() (or by a Finder that stopped
+    -- answering) resumes on the next show(): completeRebuilds() drains whatever
+    -- is here, and rebuildPlan() counts it in if the pane has to be made again.
+    pane.pending    = sp.pending
+    pane.minted     = sp.minted or {}
     pane.origin     = #sp.tabIds > 0 and "reattach" or nil
   end
+  -- Trusted only against the Finder that issued them; reclaimMinted() checks.
+  mintedPid = st.finderPid
 end
 
 -- ── Diagnostics and teardown ───────────────────────────────────────────────
@@ -1505,6 +1786,14 @@ function M.dumpState()
     if #pane.tabIds == 0 and #pane.pathList > 0 then
       lines[#lines + 1] = "    (missing; will rebuild from " .. #pane.pathList .. " saved path(s))"
     end
+    if pane.pending then
+      lines[#lines + 1] = string.format("    queued: %d tab(s) still to restore%s (want %s)",
+        #pane.pending.paths, draining[side] and ", in flight" or "",
+        tostring(pane.pending.activePath))
+      for i, path in ipairs(pane.pending.paths) do
+        lines[#lines + 1] = string.format("      (%d) %s", i, path)
+      end
+    end
     if pane.frame then
       lines[#lines + 1] = string.format("    frame = %d,%d %dx%d onScreen=%s",
         pane.frame.x, pane.frame.y, pane.frame.w, pane.frame.h,
@@ -1518,13 +1807,18 @@ end
 function M.resetState()
   store.clear()
   panes = { left = newPane("left"), right = newPane("right") }
+  draining, restoresOff = { left = false, right = false }, false
   minHeight, lastSide, prevAppBundleID, prevWindowId = {}, "left", nil, nil
 end
 
 --- Called from stop(): leave no pane stranded off screen or in the Dock.
 function M.restoreAll()
-  -- Abandon any tab restore in flight: stop() means stop.
-  for _, side in ipairs(SIDES) do panes[side].pending = nil end
+  -- Call off any tab restore, in flight or about to start: stop() means stop.
+  -- The queue itself stays -- it has been written down at every step, and
+  -- dropping it here would mean stopping the spoon silently forgot the tabs it
+  -- had not made yet.
+  restoresOff = true
+  for _, side in ipairs(SIDES) do draining[side] = false end
   M.reconcile()
   -- Get whatever is in the Dock out of it, whichever way it got there: our own
   -- collapse under hideMode = "minimize", or the user pressing Cmd+M on a pane

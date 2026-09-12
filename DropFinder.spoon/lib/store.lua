@@ -8,6 +8,19 @@
 -- keys, so integer keys would come back as strings and silently stop matching
 -- the ids read from Finder.  Aligned arrays also carry the tab-bar order that
 -- would otherwise need a third field.
+--
+-- Because of that alignment, `paths` can only ever describe tabs that already
+-- exist.  A pane rebuilt from a recipe of 8 folders is on screen with 1 tab and
+-- 7 still to make, so the other 7 live in `pending` -- and they have to be
+-- written down too, or an interrupted rebuild (Finder still waking, hs.reload(),
+-- a crash) loses them.  Added after v1 shipped, so it is read defensively and a
+-- state without it stays valid rather than being thrown away.
+--
+-- `minted` is the third list and the odd one out: not part of the model, but a
+-- record of which window ids DropFinder itself created.  It exists because
+-- forgetting one is not a harmless loss of bookkeeping -- the window stays on
+-- screen, in the panel's own slot, and nothing is then entitled to move or close
+-- it.  Read defensively for the same reason as `pending`.
 
 ---@diagnostic disable-next-line: undefined-global
 local hs = hs
@@ -23,7 +36,7 @@ local log = hs.logger.new("DropFinder.store", "info")
 function M.setLogger(l) log = l end
 
 local function emptyPane()
-  return { tabIds = {}, paths = {}, activePath = nil }
+  return { tabIds = {}, paths = {}, activePath = nil, pending = nil, minted = {} }
 end
 
 --- A fresh state table.  Also the shape every other module may assume.
@@ -33,6 +46,7 @@ function M.blank()
     version   = VERSION,
     minHeight = {},          -- { withToolbar = n, withoutToolbar = n } once measured
     lastSide  = "left",
+    finderPid = nil,         -- pid the panes' minted ids were issued by
     panes     = { left = emptyPane(), right = emptyPane() },
   }
 end
@@ -50,6 +64,9 @@ local function normalise(raw)
     end
   end
   if raw.lastSide == "left" or raw.lastSide == "right" then st.lastSide = raw.lastSide end
+  -- The pid the minted ids belong to.  Without it a Finder restarted while
+  -- Hammerspoon was not running could hand a fresh window a remembered number.
+  if type(raw.finderPid) == "number" then st.finderPid = math.floor(raw.finderPid) end
 
   local rawPanes = type(raw.panes) == "table" and raw.panes or {}
   for _, side in ipairs({ "left", "right" }) do
@@ -76,6 +93,32 @@ local function normalise(raw)
     end
     if type(rp.activePath) == "string" and rp.activePath ~= "" then
       pane.activePath = rp.activePath
+    end
+
+    -- Every id DropFinder has ever minted for this side and not seen closed.
+    -- Kept apart from tabIds because it is a *provenance* record, not a model:
+    -- reconcile drops an id the moment Finder stops listing it, and a window we
+    -- made that Finder merely failed to mention is then stranded on screen
+    -- forever, in the panel's own slot, with nothing entitled to touch it.
+    -- Requirement 4 is about the user's floating windows; a window whose id is
+    -- in this list is demonstrably not one of those.
+    local minted = type(rp.minted) == "table" and rp.minted or {}
+    for _, id in ipairs(minted) do
+      local n = tonumber(id)
+      if n then pane.minted[#pane.minted + 1] = math.floor(n) end
+    end
+
+    local pend = type(rp.pending) == "table" and rp.pending or nil
+    if pend then
+      local queued = {}
+      local raw = type(pend.paths) == "table" and pend.paths or {}
+      for _, p in ipairs(raw) do
+        if type(p) == "string" and p ~= "" then queued[#queued + 1] = p end
+      end
+      if #queued > 0 then
+        local want = type(pend.activePath) == "string" and pend.activePath ~= ""
+        pane.pending = { paths = queued, activePath = want and pend.activePath or nil }
+      end
     end
   end
   return st

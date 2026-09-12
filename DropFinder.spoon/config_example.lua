@@ -166,5 +166,13 @@ return {
 
     -- Merge the frontmost floating Finder window into the panel as tab(s).
     adopt = { mods = { "ctrl", "alt", "shift" }, key = "f" },
+
+    -- Any action also takes a list, and answers to every key in it:
+    --   toggle = {
+    --     { mods = { "alt" },  key = "`" },   -- TotalFinder's Visor key
+    --     { mods = { "ctrl" }, key = "pad0" },
+    --   },
+    -- and `false` binds nothing at all:
+    --   adopt = false,
   },
 }

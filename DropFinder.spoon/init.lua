@@ -40,6 +40,8 @@ local log = hs.logger.new("DropFinder", "info")
 ---@type any
 local cfg = nil   -- normalised config
 ---@type table
+-- name -> list of hs.hotkey: one action answers to as many keys as the config
+-- gives it.
 local hotkeys = {}
 ---@type boolean
 local started = false
@@ -90,6 +92,26 @@ function obj:configure(rawConfig)
   watchers.setConfig(cfg)
 
   return self
+end
+
+--- Drop every hotkey this spoon has bound, from either binding path.
+local function unbindHotkeys()
+  for name, list in pairs(hotkeys) do
+    for _, hk in ipairs(list) do pcall(function() hk:delete() end) end
+    hotkeys[name] = nil
+  end
+end
+
+--- Bind one action to every key it was given, keeping the handles.
+--@param name string
+--@param specs table  list of { mods = {...}, key = "x" }; may be empty
+--@param fn function
+local function bindAction(name, specs, fn)
+  for _, spec in ipairs(specs or {}) do
+    local list = hotkeys[name] or {}
+    list[#list + 1] = hs.hotkey.bind(spec.mods, spec.key, fn)
+    hotkeys[name] = list
+  end
 end
 
 --- Start the spoon: check permissions, adopt any panes we still recognise, bind
@@ -157,10 +179,7 @@ function obj:start()
     adopt  = function() obj.adoptFrontmost() end,
   }
   for name, fn in pairs(spec) do
-    local hk = cfg.hotkeys[name]
-    if hk then
-      hotkeys[name] = hs.hotkey.bind(hk.mods, hk.key, fn)
-    end
+    bindAction(name, cfg.hotkeys[name], fn)
   end
 
   started = true
@@ -177,10 +196,7 @@ function obj:stop()
     pcall(panel.restoreAll)
   end
   if watchers then watchers.stop() end
-  for name, hk in pairs(hotkeys) do
-    hk:delete()
-    hotkeys[name] = nil
-  end
+  unbindHotkeys()
   started = false
   return self
 end
@@ -243,19 +259,43 @@ function obj.resetState()
   if cfg then panel.resetState() end
 end
 
+--- One { mods, key } spec, or the list of them an action was given.
+-- The key is a string in slot 2, and a list of specs has a table there instead,
+-- so the two shapes cannot be confused for one another.
+local function specList(m)
+  if type(m) ~= "table" then return {} end
+  if type(m[1]) == "table" and type(m[2]) ~= "string" then return m end
+  return { m }
+end
+
 --- Bind hotkeys described in a map (Hammerspoon Spoon convention).
---- Replaces whatever cfg.hotkeys bound.
+--- Replaces whatever cfg.hotkeys bound.  Each action takes either one
+--- { mods, key } spec or a list of them.
 --@param mapping table  e.g. { toggle = {{"ctrl","alt"}, "f"} }
+---                     or   { toggle = { {{"ctrl","alt"}, "f"}, {{"alt"}, "`"} } }
 function obj:bindHotkeys(mapping)
   local def = {
     toggle          = obj.toggle,
     adopt_frontmost = obj.adoptFrontmost,
   }
-  for name, hk in pairs(hotkeys) do
-    hk:delete()
-    hotkeys[name] = nil
+  unbindHotkeys()
+  for name, m in pairs(mapping or {}) do
+    local fn = def[name]
+    if not fn then
+      log.ef("hotkey requested for undefined action '%s'", name)
+    else
+      -- hs.spoons.bindHotkeysToSpec is deliberately not used here.  It files one
+      -- handle per action in its own private table, so it can neither hold a
+      -- second key for the same action nor hand the handles back -- hotkeys bound
+      -- through it used to outlive stop().
+      for _, one in ipairs(specList(m)) do
+        local list = hotkeys[name] or {}
+        list[#list + 1] = hs.hotkey.bindSpec(one, one.message, fn)
+        hotkeys[name] = list
+      end
+    end
   end
-  hs.spoons.bindHotkeysToSpec(def, mapping)
+  return self
 end
 
 return obj

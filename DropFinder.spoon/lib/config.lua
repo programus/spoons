@@ -72,9 +72,43 @@ local DEFAULTS = {
 }
 
 local HOTKEY_DEFAULTS = {
-  toggle = { mods = { "ctrl", "alt" },          key = "f" },
-  adopt  = { mods = { "ctrl", "alt", "shift" }, key = "f" },
+  toggle = { { mods = { "ctrl", "alt" },          key = "f" } },
+  adopt  = { { mods = { "ctrl", "alt", "shift" }, key = "f" } },
 }
+
+--- Type-check one { mods = {...}, key = "x" } spec and copy it.
+local function hotkeySpec(name, i, hk)
+  if type(hk) ~= "table" or type(hk.mods) ~= "table" or type(hk.key) ~= "string" then
+    err(string.format('\'hotkeys.%s\'%s must be { mods = {...}, key = "x" }',
+      name, i and string.format(" entry %d", i) or ""))
+  end
+  return { mods = hk.mods, key = hk.key }
+end
+
+--- Normalise one action's hotkeys to a list of specs.
+-- An action answers to any number of keys: the TotalFinder key one hand already
+-- knows and a laptop-friendly one do not have to fight over a single binding.
+-- Accepts one spec, a list of specs, or `false` to bind nothing.
+--@return table  list of { mods = {...}, key = "x" }, possibly empty
+local function hotkeyList(name, hk)
+  if hk == nil then hk = HOTKEY_DEFAULTS[name] end
+  if hk == false then return {} end
+  if type(hk) ~= "table" then
+    err(string.format('\'hotkeys.%s\' must be { mods = {...}, key = "x" }, ' ..
+      "a list of those, or false", name))
+  end
+  -- A single spec names its fields, a list numbers them; `mods` or `key` present
+  -- at the top level is the one shape a list can never have.
+  if hk.mods ~= nil or hk.key ~= nil then return { hotkeySpec(name, nil, hk) } end
+  local out = {}
+  for i, one in ipairs(hk) do out[i] = hotkeySpec(name, i, one) end
+  -- Silently binding nothing would look like a broken hotkey rather than a
+  -- choice; `false` is how one asks for that.
+  if #out == 0 then
+    err(string.format("'hotkeys.%s' is an empty list; use false to bind nothing", name))
+  end
+  return out
+end
 
 --- Validate a raw config table and return a normalised copy.
 --@param raw table|nil
@@ -135,18 +169,7 @@ function M.loadConfig(raw)
   if type(rawHotkeys) ~= "table" then err("'hotkeys' must be a table") end
   cfg.hotkeys = {}
   for _, name in ipairs({ "toggle", "adopt" }) do
-    local hk = rawHotkeys[name]
-    if hk == nil then
-      hk = HOTKEY_DEFAULTS[name]
-    elseif hk == false then
-      hk = nil   -- explicit opt-out
-    end
-    if hk ~= nil then
-      if type(hk) ~= "table" or type(hk.mods) ~= "table" or type(hk.key) ~= "string" then
-        err(string.format("'hotkeys.%s' must be { mods = {...}, key = \"x\" } or false", name))
-      end
-      cfg.hotkeys[name] = { mods = hk.mods, key = hk.key }
-    end
+    cfg.hotkeys[name] = hotkeyList(name, rawHotkeys[name])
   end
 
   return cfg

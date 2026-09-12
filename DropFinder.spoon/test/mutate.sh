@@ -14,8 +14,12 @@ LIB=$HERE/../lib
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/dropfinder-mutants.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
+# A fourth argument names the suite to run instead of panel_spec: the config
+# module's own rules are checked by pure_spec, and running the big integration
+# suite against them would report SURVIVED for want of a test rather than for
+# want of code.
 run_mut() {
-  local label=$1 target=$2 subst=$3
+  local label=$1 target=$2 subst=$3 spec=${4:-panel_spec}
   rm -rf "$WORK" && mkdir -p "$WORK"   # safe: $WORK is unique to this run
   cp "$LIB"/*.lua "$WORK/"
   local before after
@@ -35,7 +39,7 @@ run_mut() {
     return
   fi
   local out
-  out=$(DF_LIB=$WORK/ luajit "$HERE/panel_spec.lua" 2>&1 | tail -1)
+  out=$(DF_LIB=$WORK/ luajit "$HERE/$spec.lua" 2>&1 | tail -1)
   # Compare the whole "N failed" tail, not a suffix: *"0 failed" also matches
   # "10 failed", which labelled a killed mutant SURVIVED.
   if [[ "${out##*, }" == "0 failed" ]]; then
@@ -46,7 +50,7 @@ run_mut() {
 }
 
 run_mut "adopt any new Finder window" panel.lua \
-  's/if sharesTabBar or \(#titles == 0 and paneWentInactive\) then/if true then/'
+  's/if sharesTabBar or paneGrew or \(#titles == 0 and paneWentInactive\) then/if true then/'
 run_mut "adopt on frame match alone" panel.lua \
   's/local sharesTabBar = false/local sharesTabBar = true/'
 run_mut "lone side keeps half width" geometry.lua \
@@ -92,7 +96,7 @@ run_mut "rebuild ignores the persisted tab list" panel.lua \
 run_mut "rebuild restores every tab even with restoreTabs off" panel.lua \
   's/  if cfg\.restoreTabs then/  if true then/'
 run_mut "rebuild forgets which tab was active" panel.lua \
-  's/        if not active and p == pane\.activePath then active = #paths end//'
+  's/        if not active and p == want then active = #paths end//'
 run_mut "tab order is taken from our own bookkeeping" panel.lua \
   's/  local titles = finder\.tabTitles\(w\)\n  if #titles ~= #pane\.tabIds then return end/  local titles = {}\n  if true then return end/'
 run_mut "duplicate folder names are re-ordered anyway" panel.lua \
@@ -196,7 +200,7 @@ run_mut "a pane that has gone quiet keeps its new tab anyway" panel.lua \
 run_mut "adopt does not mark the tab it just made" panel.lua \
   's/        markFresh\(newId\)//'
 run_mut "the tab restore does not mark the tab it just made" panel.lua \
-  's/      markFresh\(id\)\n      pane\.activeId = id/      pane.activeId = id/s'
+  's/      markFresh\(id\)\n      mint\(side, id\)\n      pane\.activeId = id/      mint(side, id)\n      pane.activeId = id/s'
 
 # ── Phase 3i: a hand-pressed Cmd+M survives a reconcile (from the screen) ─────
 run_mut "reconcile decides collapsed after the fallback has hidden it" panel.lua \
@@ -219,3 +223,34 @@ run_mut "layout gives up on a pane Accessibility cannot see" panel.lua \
   's/  local w = paneWindow\(side\)\n  if w then return geometry\.applyFrame/  local w = paneWindow(side)\n  if true then return geometry.applyFrame/s'
 run_mut "the settled frame is recorded for a pane that was never placed" panel.lua \
   's/      if w then\n        local now = w:frame\(\)\n/      do\n        local now = (w and w:frame()) or panes[side].frame\n/s'
+
+# ── Phase 4: one action, several hotkeys (config rules, so pure_spec) ─────────
+run_mut "a list of hotkeys keeps only the first" config.lua \
+  's/  for i, one in ipairs\(hk\) do out\[i\] = hotkeySpec\(name, i, one\) end/  for i, one in ipairs(hk) do out[i] = hotkeySpec(name, i, one) break end/' \
+  pure_spec
+run_mut "an empty hotkey list is taken quietly" config.lua \
+  's/  if #out == 0 then/  if false then/' pure_spec
+run_mut "the default hotkey spec is handed out rather than copied" config.lua \
+  's/  return \{ mods = hk\.mods, key = hk\.key \}/  return hk/' pure_spec
+
+# ── A tab Finder appended without selecting it ───────────────────────────────
+run_mut "a tab the pane's own tab bar reveals is left floating" panel.lua \
+  's/      local paneGrew = false\n      if axById\[id\] == nil then/      local paneGrew = false\n      if false then/s'
+run_mut "the growth signal skips the check that the tab is not a window" panel.lua \
+  's/      if axById\[id\] == nil then\n        local pw = paneWindow\(side\)/      if true then\n        local pw = paneWindow(side)/s'
+run_mut "a tab bar as long as the model counts as growth" panel.lua \
+  's/paneGrew = #finder\.tabTitles\(pw\) > #pane\.tabIds/paneGrew = #finder.tabTitles(pw) >= #pane.tabIds/'
+
+# ── Fix E: an id DropFinder minted is never silently forgotten ────────────────
+run_mut "a stranded window is left stranded" panel.lua \
+  's/    if not isLive\(side\) then reclaimMinted\(side\) end\n//s'
+run_mut "any window at hand is reclaimed, not only one of ours" panel.lua \
+  's/  for _, id in ipairs\(pane\.minted\) do\n    if not M\.sideOfTab\(id\) then/  for id in pairs(pathOf) do\n    if not M.sideOfTab(id) then/s'
+run_mut "minted ids Finder no longer lists are kept" panel.lua \
+  's/      if pathOf\[id\] then keep\[#keep \+ 1\] = id end/      keep[#keep + 1] = id/'
+run_mut "provenance is not written down" panel.lua \
+  's/      minted     = pane\.minted,/      minted     = {},/'
+run_mut "the Finder that issued the ids is not written down" panel.lua \
+  's/  st\.finderPid = mintedPid/  st.finderPid = nil/'
+run_mut "a different Finder process is trusted anyway" panel.lua \
+  's/  if mintedPid == pid then return true end/  if true then return true end/'

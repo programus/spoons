@@ -8,7 +8,7 @@ Requires **luajit** (`/opt/homebrew/bin/luajit`; this machine has no `lua`).
 `mutate.sh` additionally needs `perl` and `md5`, both stock on macOS.
 
 ```sh
-test/run.sh          # all three suites
+test/run.sh          # every suite
 test/mutate.sh       # the mutation gate
 ```
 
@@ -18,6 +18,7 @@ test/mutate.sh       # the mutation gate
 |---|---|
 | `pure_spec.lua` | `config.lua`, `geometry.lua`, `store.lua` — no windows involved at all |
 | `static_spec.lua` | Cross-reference check: every `M.x` / injected dep a lib calls actually exists, so a rename cannot rot a rarely-taken branch |
+| `hotkey_spec.lua` | `init.lua`: `configure` → `start` → `bindHotkeys` → `stop`, with a fake `hs.hotkey` that hands back deletable handles. The only suite that loads `init.lua`, so the only one where `start()` and `stop()` run at all |
 | `panel_spec.lua` | `panel.lua` against the simulator: show / hide / raise, the tri-state, tab tracking, multi-tab rebuilds, display changes, cross-Space, adopt, persistence, requirement 9, both `hideMode`s |
 
 `static_spec.lua` also checks `config_example.lua`: it must survive
@@ -68,7 +69,15 @@ over the tab that was active before it.  That is what a brand-new tab looks like
 from outside for a moment, and a reconcile that believes both views deletes the
 tab it just made -- measured, adopting three tabs in a row lost the middle one
 that way.  The test clears `world.newTabLagged` when it wants Finder to catch up,
-so how long the gap lasts is the test's to decide.  And `world.zorder` plus
+so how long the gap lasts is the test's to decide.  `world.addBackgroundTab`
+models the other, permanent, half of the same surprise: measured on a pane
+holding fourteen tabs, `File > New Tab` appended the tab **without selecting
+it**, so it never entered the AX tree at all and the handle `windowCreated` hands
+over is detached -- it answers with its id and its window's frame, but has no tab
+bar (`F.tabTitles` returns nothing for a handle whose tab is not the active one).
+Both original adopt signals are blind to that, and thirteen tabs in a row were
+filed as floating; the pane's own tab bar, which Accessibility still reads
+happily, is what tells the truth.  And `world.zorder` plus
 `world.activateOther` model the one global window order, including the part that
 turned requirement 12 into a defect: activating an app brings its window forward
 over anything in front of it, a Finder window the user was working in included.
@@ -121,8 +130,11 @@ asserts that a parked pane is left alone.
 ## The mutation gate
 
 `mutate.sh` copies `lib/` to a temp dir, breaks exactly one thing with `perl`,
-and points the panel suite at the copy via `DF_LIB`.  `killed` is the good
-outcome.  Two other verdicts matter:
+and points a suite at the copy via `DF_LIB` — the panel suite by default, or
+whichever one a fourth argument to `run_mut` names (`config.lua`'s own rules are
+checked by `pure_spec`, and running the integration suite against them would
+report `SURVIVED` for want of a test rather than for want of code).  `killed` is
+the good outcome.  Two other verdicts matter:
 
 - **`SURVIVED`** — the tests are weaker than they look.  Add an assertion; do
   not delete the mutant.
@@ -142,3 +154,9 @@ changes nothing and the mutant would survive for an honest reason.  They are
 mutated together (`hide() and windowMoved both forget the park`).  Same reason
 the layout mutant deletes the whole deferred re-read instead of changing what it
 assigns: assigning the requested rect happens to be right.
+
+`init.lua` is out of the gate's reach: `mutate.sh` copies `lib/` only, and
+`init.lua` finds its modules through `hs.spoons.resourcePath`, not `DF_LIB`.
+`hotkey_spec.lua` covers it by assertion instead — including the two things the
+old one-handle-per-action code got wrong, a second key for the same action and
+handles that outlived `stop()`.

@@ -785,13 +785,38 @@ do
   w2.failNewTabAt = 1                          -- Finder refuses the first one
   p2.show(); w2.drain()
   local pane = paneOf(p2, "left")
-  ck("the pane still came back", #pane.tabIds == 2, #pane.tabIds)
-  ck("the tab after the failure was still restored",
-     pane.pathList[2] == "/usr", pane.pathList[2])
-  ck("and the failed path is not in the model",
-     table.concat(pane.pathList, ","):find("Applications") == nil,
-     table.concat(pane.pathList, ","))
+  -- A path taken off the queue for a New Tab that then failed used to be simply
+  -- dropped, which is half of how 8 remembered tabs came back as 5.  New Tab
+  -- misses transiently while Finder is still waking, so it goes back on the queue.
+  ck("the pane came back whole", #pane.tabIds == 3, #pane.tabIds)
+  ck("in the order it was remembered in", table.concat(pane.pathList, ",")
+     == HOME .. "/Downloads,/Applications,/usr", table.concat(pane.pathList, ","))
   ck("nothing is left queued", pane.pending == nil)
+end
+
+-- ══ 28b. ... but a path Finder will never accept must not block the rest ════
+section("a tab Finder keeps refusing is given up on, not retried forever")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  w2.addTab(lw, "/Applications")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  w2.addTab(lw, "/usr")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  p2.hide(); w2.drain()
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+
+  w2.failNewTabFor = "/Applications"           -- this one never works
+  p2.show(); w2.drain()
+  local pane = paneOf(p2, "left")
+  ck("the tabs behind it still arrived", #pane.tabIds == 2, #pane.tabIds)
+  ck("and they are the two that could be made", table.concat(pane.pathList, ",")
+     == HOME .. "/Downloads,/usr", table.concat(pane.pathList, ","))
+  ck("the drain ended", pane.pending == nil, pane.pending and #pane.pending.paths)
+  ck("having tried the refused path more than once",
+     countLog(w2, "^newTabAt:/Applications$") == 0 and #w2.timers == 0, #w2.timers)
 end
 
 -- ══ 29. the pane is closed while its tabs are still arriving ═══════════════
@@ -826,9 +851,15 @@ do
   ck("draining the rest of the restore did not raise", ok, err)
   ck("the left pane is recorded as gone", #paneOf(p2, "left").tabIds == 0,
      #paneOf(p2, "left").tabIds)
-  ck("and it gave up on the queue", paneOf(p2, "left").pending == nil)
-  ck("its rebuild recipe survived", #paneOf(p2, "left").pathList > 0,
-     #paneOf(p2, "left").pathList)
+  -- It stops draining -- there is nothing left to drain into -- but the queue is
+  -- the other half of the rebuild recipe, and dropping it is how the tabs went
+  -- missing for good.  pathList holds the tabs that were made and pending the
+  -- rest, so between them the whole recipe is still there for the next show().
+  local left = paneOf(p2, "left")
+  ck("the queue survived for the next rebuild", left.pending ~= nil)
+  ck("and recipe plus queue still add up to every remembered tab",
+     #left.pathList + #(left.pending or { paths = {} }).paths == 3,
+     #left.pathList .. "+" .. #((left.pending or { paths = {} }).paths))
   ck("the right pane is untouched and full width",
      frameOf(p2, "right").w == hs.screen.mainScreen():frame().w,
      frameOf(p2, "right").w)
@@ -1856,6 +1887,463 @@ do
   ck("in the source's order",
      table.concat(pane.pathList, ",") == HOME .. ",/usr,/bin,/Applications",
      table.concat(pane.pathList, ","))
+end
+
+-- ══ 46. a tab Finder appended without selecting it ═════════════════════════
+-- Measured on a pane holding fourteen tabs, and the reason this section exists:
+-- File > New Tab put every tab in the tab bar without making it active, so the
+-- new id never reached the AX tree and the two original signals were both blind
+-- to it -- thirteen tabs in a row were left floating, and a hide()/show() would
+-- have thrown them away.
+section("a tab appended without being selected is still adopted")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  local id = w2.addBackgroundTab(lw, "/Applications")
+  ck("Finder did not switch to it", lw.tabs[lw.active].id ~= id,
+     tostring(lw.tabs[lw.active].id))
+  ck("and it is nowhere in the AX tree", w2.finder.axWindowById(id) == nil)
+  ck("its own handle has no tab bar to read",
+     #w2.finder.tabTitles(w2.mkwin(lw, #lw.tabs)) == 0)
+
+  p2.onWindowCreated(w2.mkwin(lw, #lw.tabs)); w2.drain()
+  local pane = paneOf(p2, "left")
+  ck("the pane adopted it anyway", p2.sideOfTab(id) == "left", tostring(p2.sideOfTab(id)))
+  ck("with its path", table.concat(pane.pathList, ",")
+     == HOME .. "/Downloads,/Applications", table.concat(pane.pathList, ","))
+  ck("and the pane's active tab was left alone", pane.activeId == lw.tabs[lw.active].id,
+     tostring(pane.activeId))
+
+  -- Requirement 2 still holds: a window the user opened lands at the same place
+  -- and the pane's tab bar is still one tab ahead of the model, but it comes with
+  -- an AX window of its own, and that is the difference.
+  local before = #pane.tabIds
+  local untracked = w2.addBackgroundTab(lw, "/usr")   -- never announced
+  local fl = w2.newWindow({ "/etc" }, { x = pane.frame.x, y = pane.frame.y,
+                                        w = pane.frame.w, h = pane.frame.h })
+  p2.onWindowCreated(w2.mkwin(fl, 1)); w2.drain()
+  ck("the floating window was not adopted", p2.sideOfTab(fl.tabs[1].id) == nil)
+  ck("the pane gained nothing from it", #paneOf(p2, "left").tabIds == before,
+     #paneOf(p2, "left").tabIds)
+  ck("nor did it swallow the untracked tab", p2.sideOfTab(untracked) == nil)
+end
+
+-- ══ 46b. the same signal must not reach into someone else's window ══════════
+-- The growth test is a comparison, so it needs its boundary pinned: a pane whose
+-- tab bar is exactly as long as the model has not grown.  A Cmd+T in the user's
+-- own floating window -- which they may well have dragged over the panel -- looks
+-- from the outside exactly like the case above, minus that growth.
+section("a tab appended to a floating window at the pane's place is left alone")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  w2.addTab(lw, "/Applications")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  local pane = paneOf(p2, "left")
+  ck("the pane owns two tabs", #pane.tabIds == 2, #pane.tabIds)
+  ck("and its tab bar lists exactly those",
+     #w2.finder.tabTitles(p2.paneWindow("left")) == #pane.tabIds,
+     #w2.finder.tabTitles(p2.paneWindow("left")))
+
+  local fl = w2.newWindow({ "/etc", "/var" }, { x = pane.frame.x, y = pane.frame.y,
+                                                w = pane.frame.w, h = pane.frame.h })
+  local id = w2.addBackgroundTab(fl, "/usr")
+  p2.onWindowCreated(w2.mkwin(fl, #fl.tabs)); w2.drain()
+  ck("the pane did not take the other window's tab", p2.sideOfTab(id) == nil,
+     tostring(p2.sideOfTab(id)))
+  ck("and still owns two", #paneOf(p2, "left").tabIds == 2,
+     #paneOf(p2, "left").tabIds)
+end
+
+-- ══ 47. an interrupted rebuild must not be a lost rebuild ══════════════════
+-- The measured failure this whole section exists for: after `killall Finder`, the
+-- hotkey brought the left pane back with 5 of its 8 tabs and the other 3 were
+-- gone from memory *and* from disk.  Three things had to be true at once, and
+-- this is the first: a pane rebuilt from a recipe goes on screen with one tab, so
+-- the paths array -- which is index-aligned with the tab ids -- can only describe
+-- that one tab, and show() persists right there, before the rest are made.
+section("the recipe on disk stays whole while a rebuild is still running")
+do
+  local hsStub, w2 = W.new()
+  hs = hsStub
+  local configLib = dofile(R .. "config.lua")
+  local geo = dofile(R .. "geometry.lua")
+  local st  = dofile(R .. "store.lua")
+  local p2  = dofile(R .. "panel.lua")
+  local c2  = configLib.loadConfig()
+  p2.setDeps({ finder = w2.finder, geometry = geo, store = st, log = hs.logger.new() })
+  p2.setConfig(c2); p2.loadState(); p2.reconcile()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  for _, path in ipairs({ "/Applications", "/usr", "/etc" }) do
+    w2.addTab(lw, path)
+    p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  end
+  ck("four tabs to remember", #paneOf(p2, "left").tabIds == 4,
+     #paneOf(p2, "left").tabIds)
+  p2.hide(); w2.drain()
+  w2.windows = {}                              -- killall Finder
+  p2.onFinderTerminated(); w2.drain()
+
+  -- Press the hotkey and stop the world mid-drain: the panel is up with its
+  -- first tab and the other three are still queued.
+  -- Press the hotkey and stop the world at the exact step show() writes the
+  -- rebuilt pane down -- before completeRebuilds() has made a single extra tab.
+  -- That write is the one that used to truncate the recipe to one folder.
+  p2.show()
+  local guard = 0
+  while guard < 40 and #st.load().panes.left.tabIds ~= 1 do
+    w2.step(); guard = guard + 1
+  end
+  local disk = st.load()
+  ck("the panel is up and written down with one tab",
+     #disk.panes.left.tabIds == 1, #disk.panes.left.tabIds)
+  ck("the pane still has a queue behind it", paneOf(p2, "left").pending ~= nil)
+  local queued = (disk.panes.left.pending or { paths = {} }).paths
+  ck("but what is written down is the whole recipe",
+     #disk.panes.left.paths + #queued == 4,
+     #disk.panes.left.paths .. "+" .. #queued)
+  ck("and it says which tab was meant to end up active",
+     (disk.panes.left.pending or {}).activePath ~= nil)
+
+  -- Now lose Hammerspoon in the middle of it.  Fresh modules against the same
+  -- Finder and the same settings -- and no timers, because a reload takes the
+  -- whole Lua state with it, in-flight drain included.  The New Tab that was in
+  -- flight goes with it: what was written down is what exists.
+  local rw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  while #rw.tabs > 1 do w2.closeTabById(rw.tabs[#rw.tabs].id) end
+  w2.timers = {}
+  local p3 = dofile(R .. "panel.lua")
+  p3.setDeps({ finder = w2.finder, geometry = dofile(R .. "geometry.lua"),
+               store = dofile(R .. "store.lua"), log = hs.logger.new() })
+  p3.setConfig(c2); p3.loadState(); p3.reconcile()
+  ck("the queue came back with it", paneOf(p3, "left").pending ~= nil)
+  p3.show(); w2.drain()
+  local pane = paneOf(p3, "left")
+  ck("and the next press finishes the job", #pane.tabIds == 4, #pane.tabIds)
+  ck("with every folder in its place", table.concat(pane.pathList, ",")
+     == HOME .. "/Downloads,/Applications,/usr,/etc", table.concat(pane.pathList, ","))
+  ck("nothing left over", pane.pending == nil)
+  ck("as tabs of one window", #w2.windowOfId(pane.tabIds[1]).tabs == 4)
+end
+
+-- ══ 47b. the one moment a reload cannot be papered over ════════════════════
+-- A New Tab that Finder has already made but whose id has not come back yet: the
+-- tab exists, nothing knows about it, and a reload right there leaves it as the
+-- pane's active tab with no entry in the model.  AX only ever exposes the active
+-- tab, so the drain has no handle to press New Tab in -- and guessing which real
+-- window is ours from tab-bar folder names could pour tabs into one of the user's
+-- own windows, which is the one thing this spoon must never do.  So it stops.
+-- What it must still do is lose nothing: the recipe is intact and the next
+-- rebuild of that side puts every tab back.
+section("a reload between a tab and its bookkeeping loses no paths")
+do
+  local hsStub, w2 = W.new()
+  hs = hsStub
+  local configLib = dofile(R .. "config.lua")
+  local st  = dofile(R .. "store.lua")
+  local p2  = dofile(R .. "panel.lua")
+  local c2  = configLib.loadConfig()
+  p2.setDeps({ finder = w2.finder, geometry = dofile(R .. "geometry.lua"),
+               store = st, log = hs.logger.new() })
+  p2.setConfig(c2); p2.loadState(); p2.reconcile()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  for _, path in ipairs({ "/Applications", "/usr", "/etc" }) do
+    w2.addTab(lw, path)
+    p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  end
+  p2.hide(); w2.drain()
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+
+  p2.show()
+  local guard = 0
+  while guard < 40 and #st.load().panes.left.tabIds ~= 1 do
+    w2.step(); guard = guard + 1
+  end
+  local rw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  ck("Finder has made a tab nothing has been told about yet", #rw.tabs == 2, #rw.tabs)
+  w2.timers = {}                               -- hs.reload() lands right here
+
+  local p3 = dofile(R .. "panel.lua")
+  p3.setDeps({ finder = w2.finder, geometry = dofile(R .. "geometry.lua"),
+               store = dofile(R .. "store.lua"), log = hs.logger.new() })
+  p3.setConfig(c2); p3.loadState(); p3.reconcile()
+  p3.show(); w2.drain()
+  local pane = paneOf(p3, "left")
+  local queued = (pane.pending or { paths = {} }).paths
+  ck("every remembered folder is still accounted for",
+     #pane.pathList + #queued == 4, #pane.pathList .. "+" .. #queued)
+  ck("and nothing was poured into a window we could not identify",
+     #w2.windows == 2 and #rw.tabs == 2, #w2.windows .. "/" .. #rw.tabs)
+
+  -- The next rebuild of that side is what makes it whole again.
+  w2.windows = {}
+  p3.onFinderTerminated(); w2.drain()
+  p3.show(); w2.drain()
+  local after = paneOf(p3, "left")
+  ck("a rebuild brings all four back", #after.tabIds == 4, #after.tabIds)
+  ck("in order", table.concat(after.pathList, ",")
+     == HOME .. "/Downloads,/Applications,/usr,/etc", table.concat(after.pathList, ","))
+end
+
+-- ══ 48. "its window is gone" is two different things ═══════════════════════
+-- The second of the three: a Finder that has just relaunched can answer "no
+-- windows" from its AX tree for a long time while AppleScript lists them all --
+-- measured, and confirmed through System Events, so it is Finder's AX server and
+-- not Hammerspoon's doing.  The drain used to read that as "the pane is gone",
+-- drop the queue and log one warning.
+section("a rebuild waits out an AX tree that has gone blind")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  w2.addTab(lw, "/Applications")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  w2.addTab(lw, "/usr")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  p2.hide(); w2.drain()
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+
+  w2.axBlindRounds = 4                         -- Finder is back; its AX tree is not
+  p2.show(); w2.drain()
+  local pane = paneOf(p2, "left")
+  ck("every remembered tab still came back", #pane.tabIds == 3, #pane.tabIds)
+  ck("in order", table.concat(pane.pathList, ",")
+     == HOME .. "/Downloads,/Applications,/usr", table.concat(pane.pathList, ","))
+  ck("and the queue is empty because it was drained, not dropped",
+     pane.pending == nil)
+end
+
+-- ══ 48b. ... and when it really is gone, the queue is kept for later ═══════
+-- The pane is not coming back on its own, so the drain has to stop.  What it must
+-- not do is take the paths with it: the next hotkey press is the thing that
+-- rebuilds the pane, and it needs the recipe.
+section("a pane that is really gone keeps its queue for the next press")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  w2.addTab(lw, "/Applications")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  w2.addTab(lw, "/usr")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  p2.hide(); w2.drain()
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+
+  p2.show()
+  local guard = 0
+  while paneOf(p2, "left").pending == nil and guard < 20 do
+    w2.step(); guard = guard + 1
+  end
+  -- Cmd+W on the pane while its tabs are still arriving, and Finder never
+  -- answers for it again.
+  w2.closeWindow(w2.windowOfId(paneOf(p2, "left").tabIds[1]))
+  p2.onWindowDestroyed(); w2.drain()
+  ck("the pane is recorded as gone", #paneOf(p2, "left").tabIds == 0)
+  ck("the queue is still there", paneOf(p2, "left").pending ~= nil)
+
+  -- And the next press rebuilds from recipe plus queue, not from the one tab that
+  -- happened to exist when the pane died.
+  p2.show(); w2.drain()
+  local pane = paneOf(p2, "left")
+  ck("the pane came back with all three tabs", #pane.tabIds == 3, #pane.tabIds)
+  ck("in the remembered order", table.concat(pane.pathList, ",")
+     == HOME .. "/Downloads,/Applications,/usr", table.concat(pane.pathList, ","))
+end
+
+-- ══ 48c. stop() calls the drain off without forgetting what it owed ═════════
+section("stop() ends a restore in flight but keeps its paths")
+do
+  local p2, w2, _, _, st = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  w2.addTab(lw, "/Applications")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  w2.addTab(lw, "/usr")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  p2.hide(); w2.drain()
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+
+  p2.show()
+  local guard = 0
+  while paneOf(p2, "left").pending == nil and guard < 20 do
+    w2.step(); guard = guard + 1
+  end
+  local before = #paneOf(p2, "left").tabIds
+  p2.persistNow()
+  p2.restoreAll()                              -- what stop() does
+  w2.drain()
+  ck("the restore stopped where it was", #paneOf(p2, "left").tabIds == before,
+     #paneOf(p2, "left").tabIds .. "/" .. before)
+  local disk = st.load()
+  local queued = (disk.panes.left.pending or { paths = {} }).paths
+  ck("and every path is still written down",
+     #disk.panes.left.paths + #queued == 3,
+     #disk.panes.left.paths .. "+" .. #queued)
+end
+
+-- ══ 49. a window we made and then lost sight of is taken back, not abandoned ══
+-- The defect this section exists for, measured on the machine: reconcile drops an
+-- id the moment Finder stops listing it, which is right for the model and wrong
+-- for the window.  Finder omits live windows for reasons of its own (for minutes
+-- after a relaunch, and for a pane whose display is showing another Space), and
+-- the id that was dropped was also forgotten -- so two windows DropFinder had
+-- made itself sat in the panel's two slots for an hour, with the rebuilt panes
+-- laid out exactly on top of them.  From the outside the panel had stopped
+-- hiding and the hotkey only moved focus.
+section("a pane Finder stopped mentioning is reclaimed, not duplicated")
+do
+  local p2, w2, _, geo, st = boot()
+  p2.show(); w2.drain()
+  local lid = paneOf(p2, "left").tabIds[1]
+  local rid = paneOf(p2, "right").tabIds[1]
+  local lrw = w2.windowOfId(lid)
+  local shown = lrw.frame
+
+  -- Finder stops mentioning the left pane, and its display is showing another
+  -- Space so Accessibility cannot vouch for it either.  The right pane keeps
+  -- answering, so this is not the total blindness the snapshot guard covers.
+  w2.snapshotOmits = { [lid] = true }
+  w2.setWindowSpace(lid, 7)
+  w2.spaceOfScreen[hs.screen.allScreens()[1]] = 3
+  p2.reconcile()
+  ck("the model has let the left pane go", not liveSide(p2, "left"),
+     #paneOf(p2, "left").tabIds)
+  ck("but the window is still there, in the panel's slot", w2.windowOfId(lid) ~= nil)
+
+  -- Finder starts answering again -- which is all that ever happened in reality.
+  w2.snapshotOmits = nil
+  w2.setWindowSpace(lid, 3)
+  local before = #w2.windows
+  p2.show(); w2.drain()
+  ck("the stranded window is the left pane again",
+     paneOf(p2, "left").tabIds[1] == lid, paneOf(p2, "left").tabIds[1])
+  ck("no second pane was made for that side", #w2.windows == before, #w2.windows)
+  ck("the right pane was left alone", paneOf(p2, "right").tabIds[1] == rid)
+  ck("and it is laid out, not left where it was stranded",
+     geo.isOnScreen(frameOf(p2, "left")))
+
+  -- The whole point: it hides again.
+  p2.hide(); w2.drain()
+  ck("the reclaimed pane parks with the other", p2.state() == "hidden", p2.state())
+  ck("off the screen it was stranded on",
+     not geo.framesEqual(w2.windowOfId(lid).frame, shown, 4))
+  local disk = st.load()
+  ck("and the reclaim is on disk", disk.panes.left.tabIds[1] == lid,
+     tostring(disk.panes.left.tabIds[1]))
+end
+
+-- The record has to outlive the process that made it, because the reload is
+-- exactly when the model is at its thinnest.
+section("a window stranded before a reload is reclaimed after it")
+do
+  local p2, w2, cfg2, geo, st = boot()
+  p2.show(); w2.drain()
+  local lid = paneOf(p2, "left").tabIds[1]
+
+  -- Lose it from the model, then reload: nothing in memory remembers the window,
+  -- so only what was written down can save it.
+  w2.snapshotOmits = { [lid] = true }
+  w2.setWindowSpace(lid, 7)
+  w2.spaceOfScreen[hs.screen.allScreens()[1]] = 3
+  p2.reconcile()
+  p2.persistNow()
+  ck("the id is gone from the model", not liveSide(p2, "left"))
+  local disk = st.load()
+  ck("but it was minted, and that is written down",
+     disk.panes.left.minted and disk.panes.left.minted[1] == lid,
+     disk.panes.left.minted and disk.panes.left.minted[1])
+
+  -- A fresh module set, same world: hs.reload().
+  local panel2 = dofile(R .. "panel.lua")
+  panel2.setDeps({ finder = w2.finder, geometry = geo, store = st,
+                   log = hs.logger.new() })
+  panel2.setConfig(cfg2)
+  panel2.loadState()
+  w2.snapshotOmits = nil
+  w2.setWindowSpace(lid, 3)
+  panel2.reconcile()
+  local before = #w2.windows
+  panel2.show(); w2.drain()
+  ck("the reloaded panel took the window back",
+     panel2.panes().left.tabIds[1] == lid, panel2.panes().left.tabIds[1])
+  ck("without opening anything new", #w2.windows == before, #w2.windows)
+end
+
+-- Requirement 4 is the reason this is a list of ids and not a search for windows
+-- that look like panes.
+section("a window the user opened is never reclaimed")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lid = paneOf(p2, "left").tabIds[1]
+  local lrw = w2.windowOfId(lid)
+  local shown = { x = lrw.frame.x, y = lrw.frame.y, w = lrw.frame.w, h = lrw.frame.h }
+
+  -- The user's own window, opened at exactly the pane's place and never adopted.
+  p2.hide(); w2.drain()
+  local floater = w2.newWindow({ "/Applications" }, shown)
+  local fid = floater.tabs[1].id
+
+  -- And the left pane closes for real.
+  w2.closeTabById(lid)
+  p2.reconcile()
+  ck("the left side is missing", not liveSide(p2, "left"))
+
+  local before = #w2.windows
+  p2.show(); w2.drain()
+  ck("the floating window was not taken for the pane",
+     paneOf(p2, "left").tabIds[1] ~= fid, paneOf(p2, "left").tabIds[1])
+  ck("a real pane was made instead", #w2.windows == before + 1, #w2.windows)
+  ck("and the floater stayed where the user left it",
+     w2.windowOfId(fid).frame.x == shown.x and w2.windowOfId(fid).frame.y == shown.y)
+end
+
+-- Finder hands ids out per process.  Termination clears the record, but Finder
+-- can also be restarted while Hammerspoon is not running, and then a fresh
+-- window could wear a remembered number.
+section("ids from an earlier Finder are not trusted")
+do
+  local p2, w2, cfg2, geo, st = boot()
+  p2.show(); w2.drain()
+  local lid = paneOf(p2, "left").tabIds[1]
+  p2.persistNow()
+
+  -- Finder restarts behind our back: same numbers handed out, different process,
+  -- and no terminated event ever reached us.
+  local panel2 = dofile(R .. "panel.lua")
+  panel2.setDeps({ finder = w2.finder, geometry = geo, store = st,
+                   log = hs.logger.new() })
+  panel2.setConfig(cfg2)
+  panel2.loadState()
+  w2.windows = {}
+  w2.finderPid = 9999
+  -- A fresh process starts its numbering over, so the first window it makes can
+  -- wear the number the old pane had.
+  w2.nextId = lid - 5
+  local floater = w2.newWindow({ "/Applications" })
+  local fid = floater.tabs[1].id
+  ck("the new window wears the old pane's number", fid == lid, fid .. "/" .. lid)
+
+  panel2.reconcile()
+  local before = #w2.windows
+  panel2.show(); w2.drain()
+  ck("it was not taken for the pane",
+     panel2.panes().left.tabIds[1] ~= fid, panel2.panes().left.tabIds[1])
+  ck("panes were made for both sides", #w2.windows == before + 2, #w2.windows)
+  ck("the remembered path came back instead of the floater's",
+     paneOf(panel2, "left").pathList[1] == HOME .. "/Downloads",
+     tostring(paneOf(panel2, "left").pathList[1]))
+  ck("and the floater was left where it was made",
+     w2.windowOfId(fid).frame.x == 100 and w2.windowOfId(fid).frame.y == 100,
+     w2.windowOfId(fid).frame.x .. "," .. w2.windowOfId(fid).frame.y)
 end
 
 print(string.format("\n%d passed, %d failed", pass, fail))

@@ -68,12 +68,28 @@ Every field is optional. The ones worth knowing about:
 | `crossSpaceFallback` | `"activate"` | What to do if that move is refused: `"activate"` (leave it) or `"recreate"` (rebuild the side here). |
 | `hotkeys` | `Ctrl+Alt+F` / `Ctrl+Alt+Shift+F` | `toggle` and `adopt`. |
 
-Hotkeys can also be bound the `hs.spoons` way, which replaces whatever `cfg.hotkeys` set:
+Either action takes one key, a list of keys, or `false` for none:
+
+```lua
+hotkeys = {
+  toggle = {
+    { mods = { "alt" },          key = "`" },      -- TotalFinder's Visor key
+    { mods = { "ctrl", "alt" },  key = "f" },      -- and one for the other hand
+  },
+  adopt = false,                                   -- bind nothing
+}
+```
+
+Hotkeys can also be bound the `hs.spoons` way, which replaces whatever `cfg.hotkeys` set. Here too an action takes one spec or a list of them:
 
 ```lua
 spoon.DropFinder:bindHotkeys({
   toggle          = { { "ctrl", "alt" },          "f" },
   adopt_frontmost = { { "ctrl", "alt", "shift" }, "f" },
+})
+
+spoon.DropFinder:bindHotkeys({
+  toggle = { { { "alt" }, "`" }, { { "ctrl", "alt" }, "f" } },
 })
 ```
 
@@ -128,6 +144,8 @@ Finder's tab model is only partly visible to automation, and the two halves disa
 
 So a *pane* is simply a set of tab ids. An id gets into that set in exactly three ways: DropFinder created it, you pressed adopt on it, or it matches an id that was persisted. Nothing else is ever managed — that is the whole mechanism behind "floating windows are never touched".
 
+Every id DropFinder *makes* is also written down separately, together with the pid of the Finder that issued it. That record is what keeps the guarantee from turning into a trap. Finder sometimes stops listing a live window — for minutes after a relaunch, or while its display is showing another Space — and a pane whose ids all vanish that way would otherwise be dropped from the model while the windows are still sitting in the panel's own slots, where nothing is entitled to move or close them any more. Before a side is rebuilt, DropFinder looks for exactly those windows and takes them back instead of opening new ones. The pid is the other half: ids are handed out per Finder process, so if the pid has changed since the ids were written — Finder restarted while Hammerspoon was not running — every remembered number is discarded and the sides are rebuilt from their paths, because a window in the new process could be wearing one of those numbers.
+
 Tab **order** is read from the window's tab bar (`AXTabGroup`, titled `"tab bar"`), since AppleScript enumerates tabs by recency rather than position. Which tab is **active** is read from the same place, on demand: switching tabs emits no usable event, so there is nothing to track it with.
 
 ## Known limitations
@@ -137,9 +155,11 @@ Some of these are macOS refusing, not DropFinder giving up.
 - **TotalFinder cannot run at the same time.** It injects into Finder and turns every tab into a real window, which DropFinder misreads completely; the two also compete for the same screen area. DropFinder detects the injection and alerts, but still starts. Quit TotalFinder and restart Finder.
 - **The panel cannot float above other windows.** No API lets Hammerspoon raise another app's window into a floating level. Other windows can cover the panel; that is why losing focus does not hide it.
 - **Hiding leaves a sliver.** AppKit's `constrainFrameRect:toScreen:` keeps roughly 40px horizontally and 52px vertically of every window on the desktop, through both Accessibility and AppleScript. `hideMode = "park"` therefore leaves an approximately 40×52px corner visible. It is clickable and draggable; if you drag it, the next show puts it right. `hideMode = "minimize"` removes the sliver at the price of two Dock thumbnails and panes that only the hotkey can bring back.
+- **A rebuild that is interrupted is resumed, not lost.** Restoring eight tabs takes several seconds, one New Tab at a time, and the tabs that have not been made yet live in a queue that is written to disk along with the rest of the recipe — so a reload, a crash or a second `killall` in the middle of a rebuild costs you nothing but the wait. One case degrades rather than resuming: if Hammerspoon reloads while a New Tab is in flight, the pane's active tab can be one the reloaded model has never seen, and there is then no window it is *certain* belongs to the pane. Rather than guess (and risk pouring tabs into one of your floating windows) DropFinder stops that drain and keeps the queue — the next hotkey press rebuilds the side and every path comes back.
 - **Per-tab back/forward history is not restorable.** Neither API exposes it, so a rebuilt tab starts with empty history. Ordinary hiding keeps it, because nothing is closed.
 - **Two tabs with the same folder name in one pane can be listed in the wrong order.** The tab bar only reports basenames, so identical names cannot be told apart. No path is ever lost or duplicated — paths come from ids — only the order of those two entries may be wrong.
-- **Right after `killall Finder`** macOS restores Finder's pre-crash windows with fresh ids. DropFinder correctly refuses to adopt them, so for a moment you may see four panel-sized windows: two floating leftovers and the two rebuilt panes. Close the leftovers.
+- **Right after `killall Finder`** macOS restores Finder's pre-crash windows with fresh ids. DropFinder correctly refuses to adopt them, so for a moment you may see four panel-sized windows: two floating leftovers and the two rebuilt panes. Close the leftovers. (Two *further* stray windows used to appear here, one per side, titled with your machine name: a just-relaunched Finder accepts `make new Finder window` but cannot say which id it made, so the window could be neither used nor closed. The id is now recovered from the error's own object specifier and the window is closed, so only macOS's own leftovers remain.)
+- **A Finder restart nobody saw costs you the windows' identity, not their contents.** If Finder is restarted while Hammerspoon is not running, the panes' ids belong to a process that no longer exists and the numbers may have been handed out again. DropFinder compares Finder's pid with the one it saved, throws the numbers away and rebuilds both sides from their saved paths — so the panel comes back complete, but the two windows from before are left behind as floating windows for you to close, and their scroll positions and selections are gone.
 - **The first press after Finder restarts is slow.** A Finder that has just relaunched and has never been activated accepts new windows but cannot address them, and answers `id of every window` with nothing at all. DropFinder notices, activates Finder once — the same thing `open -a Finder` does — takes back the windows it could not use, and tries again, which takes a few seconds. During those seconds the panel may briefly come up one side at a time.
 - **Adopt rebuilds, it does not move.** Merged tabs keep their paths and order, but lose scroll position, selection and history. To read a tab's path the tab has to be the active one, so during a merge you will see the source window flick through its tabs left to right. `Window ▸ Merge All Windows` is deliberately not used: it is a global action that would swallow the other pane and every floating window too. If a tab cannot be recreated, adopt stops there — the tabs already moved stay in the pane, the rest stay in the source window, and nothing is lost.
 - **Cross-Space works, but not through `hs.spaces`.** Measured on macOS 26 with Spaces created for the purpose: `hs.spaces.moveWindowToSpace` returns `true` and moves nothing, and `windowSpaces` keeps reporting the Space the window was already on. DropFinder checks rather than believes, so the claim is caught and the panel falls back per `crossSpaceFallback`. **If you use several Spaces, set `crossSpaceFallback = "recreate"`** — it closes the panes and reopens them at the same paths on the Space you are standing on, which does work, at the cost of scroll position and selection. The default `"activate"` leaves the panel where it is and tells you once.

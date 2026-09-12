@@ -4,7 +4,7 @@ The offline suites run `lib/` against a simulator; these sixteen steps are the
 ones that need a real Finder, real windows and a real screen.  They come from the
 end of the implementation plan.  This file records the last time each was walked
 and, more usefully, **what walking them found that the simulator could not** —
-five defects, every one of them now fixed, covered offline and mutation-gated.
+six defects, every one of them now fixed, covered offline and mutation-gated.
 
 Before running anything against the live machine, ask one question first:
 
@@ -29,7 +29,10 @@ passes were thrown away to that before the check became routine.
 | 7 | Close the right pane entirely | The left one takes the whole panel width immediately |
 | 8 | Hide, show | The right side is rebuilt at the path it was last at; both back to half width |
 | 9 | `hs.reload()`, hotkey | Both sides reattach by id — no new windows, no flicker |
-| 10 | `killall Finder`, hotkey | Both sides rebuilt from the persisted paths, all tabs |
+| 10 | `killall Finder`, hotkey | Both sides rebuilt from the persisted paths, all tabs, and no extra windows beyond the ones macOS itself restores |
+| 10b | `killall Finder` again while a rebuild is still running, then hotkey | The queued tabs are still on disk and come back on the next press |
+| 10c | Quit Hammerspoon, `killall Finder`, start Hammerspoon again, hotkey | Both sides rebuilt from the paths; the two windows from before are left floating, never moved — the log says Finder is a different process now |
+| 10d | With the panel up, hide it, then make Finder stop listing one side (another Space on its display, or a fresh relaunch), then hotkey twice | The side is taken back rather than opened again — no third window in that slot; the log says `reclaimed N ... window(s)` |
 | 11 | Open a Finder window by double-clicking a folder | It stays floating: never moved, resized or closed, and it stays put when the panel hides |
 | 12 | Cmd+M a pane by hand, then the hotkey; then the same walk under `hideMode = "minimize"` | Both verified — see below |
 | 13 | Press the hotkey from another Space | **Verified**, after fixing what it exposed. See below |
@@ -56,7 +59,7 @@ the show and after the raise — the raise lifted the two panes without lifting 
 
 ## What the live pass found
 
-Five things the simulator agreed with and the machine did not:
+Six things the simulator agreed with and the machine did not:
 
 1. **`raise()` lifted both panes over the floating window** the user was working
    in.  Raising the sibling first and focusing the target last fixes the order.
@@ -78,6 +81,18 @@ Five things the simulator agreed with and the machine did not:
    resolvable left it saying "hidden" about a panel sitting on the grid, and the
    next press showed a panel that was already up.  `toggle()` now reconciles
    first, which costs about 100ms.
+6. **`File > New Tab` does not always select the tab it makes.** Measured while
+   refilling a pane with the thirteen tabs TotalFinder had saved: on a window that
+   already held fourteen, every new tab was appended to the tab bar *without*
+   becoming active, so it never entered the Accessibility tree, the handle
+   `windowCreated` delivered was detached (its id and frame answer, its tab bar
+   does not), and the pane's own active tab never moved.  Both of
+   `onWindowCreated`'s signals assume the new tab is the active one, so all
+   thirteen were filed as floating — the tabs were on screen and a hide()/show()
+   would have thrown them away.  The pane's own window is readable throughout and
+   is the honest witness: its tab bar now lists more tabs than the pane owns,
+   while a window the user double-clicked open leaves that count alone and arrives
+   with an AX window of its own.  Requiring both is what keeps requirement 2.
 
 ## Step 13, cross-Space
 

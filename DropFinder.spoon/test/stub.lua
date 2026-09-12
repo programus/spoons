@@ -64,7 +64,10 @@ function S.install(screens, opts)
     logger = {
       new = function()
         local noop = function() end
-        return { d = noop, i = noop, w = noop, e = noop, v = noop }
+        -- The `*f` variants are real hs.logger methods; a stub without them
+        -- turns a log line into a crash on whichever branch reaches for one.
+        return { d = noop, i = noop, w = noop, e = noop, v = noop,
+                 df = noop, f = noop, wf = noop, ef = noop, vf = noop }
       end,
     },
     settings = {
@@ -88,6 +91,16 @@ function S.install(screens, opts)
     -- module that reaches for one should fail loudly rather than get a stub.
     application = {},
     alert = { show = function() end },
+    -- AppleScript is a hook rather than a stub: the specs that need it pass
+    -- opts.applescript and answer whatever their own case is about.  The default
+    -- refuses, so a module reaching for Finder in a test that did not arrange it
+    -- fails there instead of somewhere later.
+    osascript = {
+      applescript = function(src)
+        if opts.applescript then return opts.applescript(src) end
+        return false, nil, { NSLocalizedDescription = "no AppleScript in this test" }
+      end,
+    },
     timer = {
       secondsSinceEpoch = function() return os.time() end,
       doAfter = function(_, fn) return { stop = function() end, _fn = fn } end,

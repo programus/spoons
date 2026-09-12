@@ -300,6 +300,20 @@ end
 
 -- ── Writing ────────────────────────────────────────────────────────────────
 
+--- Dig a window id out of an AppleScript object specifier.
+-- Only the number is trusted: everything around it ("Can't make", "into type
+-- text") is localised, while `<<class brow>> id 51900` is Finder's own raw
+-- specifier and is not.  Anchored on `id ` before the digits so a path or an
+-- error code elsewhere in the message cannot be mistaken for it.
+--@param spec string|nil
+--@return integer|nil
+local function strayIdFromSpecifier(spec)
+  if type(spec) ~= "string" then return nil end
+  local last = nil
+  for n in spec:gmatch("id (%d+)") do last = n end
+  return last and math.floor(tonumber(last)) or nil
+end
+
 --- Open a new Finder window at a path.
 -- The new id comes from diffing the id set rather than from `id of nw`, which is
 -- the family of expression that raises -1700 on some Finder builds.
@@ -320,9 +334,17 @@ function M.openWindowAt(path)
   -- collection is empty as far as AppleScript is concerned -- `count windows`
   -- answers 0 while the windows macOS restored are sitting there -- so
   -- `window id N` cannot be addressed and the target cannot be set (-10006 /
-  -- -1728).  The id is reported back as `STRAY|id|message` so the caller can
-  -- close the window once Finder is answering again; nothing here can close it,
-  -- because closing addresses the window too.
+  -- -1728).  The id is reported back as `STRAY|id|message|specifier` so the
+  -- caller can close the window once Finder is answering again; nothing here can
+  -- close it, because closing addresses the window too.
+  --
+  -- In the worst version of that state `id of nw` raises as well, so newId stays
+  -- -1 and there is seemingly nothing to report -- which is how two untargeted
+  -- windows came to be left on screen after every `killall Finder`.  But the id
+  -- is still there to be read: coercing the window to text fails with the raw
+  -- object specifier in the message, `Can't make <<class brow>> id 51900 of
+  -- application "Finder" into type text`, and that number is the window's id.
+  -- Hence the deliberate `nw as text`, whose *error* is the payload.
   local src = string.format([[
 tell application "Finder"
   set nw to make new Finder window
@@ -330,10 +352,18 @@ tell application "Finder"
   try
     set newId to id of nw
   end try
+  set spec to ""
+  if newId is -1 then
+    try
+      set spec to (nw as text)
+    on error e0
+      set spec to e0
+    end try
+  end if
   try
     set target of window id newId to (POSIX file "%s" as alias)
   on error e
-    return "STRAY|" & (newId as string) & "|" & e
+    return "STRAY|" & (newId as string) & "|" & e & "|" & spec
   end try
   set theIds to id of every window
   set out to ""
@@ -347,10 +377,11 @@ end tell
   local out, err2 = runAS(src)
   if err2 then return nil, err2 end
   local text = tostring(out or "")
-  local strayId, strayErr = text:match("^STRAY|(%-?%d+)|(.*)$")
+  local strayId, strayErr, spec = text:match("^STRAY|(%-?%d+)|([^|]*)|(.*)$")
   if strayId then
     local id = math.floor(tonumber(strayId))
-    return nil, "Finder would not accept a target: " .. strayErr, id >= 0 and id or nil
+    if id < 0 then id = strayIdFromSpecifier(spec) end
+    return nil, "Finder would not accept a target: " .. strayErr, id and id >= 0 and id or nil
   end
   for line in text:gmatch("%d+") do
     local id = math.floor(tonumber(line))
