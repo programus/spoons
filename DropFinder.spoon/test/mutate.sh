@@ -254,3 +254,35 @@ run_mut "the Finder that issued the ids is not written down" panel.lua \
   's/  st\.finderPid = mintedPid/  st.finderPid = nil/'
 run_mut "a different Finder process is trusted anyway" panel.lua \
   's/  if mintedPid == pid then return true end/  if true then return true end/'
+
+# ── Fix F: a tab dragged from one of the panel's windows into the other ───────
+# Not every line here has a mutant.  The blind-AX, minimized, mid-rebuild and
+# fresh-tab guards at the top of needsRegroup() are belt and braces: with any of
+# them removed the regroup still declines, because a blind tree resolves no
+# window to check, a minimized one cannot be handed a side, and an unpublished
+# tab is a tab no tab bar accounts for.  Their behaviour is covered by sections
+# of its own in panel_spec.lua; there is nothing a mutant of them can change.
+run_mut "a drag between the panel's windows is never noticed" panel.lua \
+  's/  if needsRegroup\(\) then regroupPanes\(\) end/  if false then regroupPanes() end/'
+run_mut "a window holding a different number of our tabs is not detected" panel.lua \
+  's/      elseif #titles ~= #pane\.tabIds then\n        return true/      elseif false then\n        return true/s'
+run_mut "a window holding a different set of our tabs is not detected" panel.lua \
+  's/          if not bag\[b\] or bag\[b\] == 0 then return true end/          if false then return true end/'
+run_mut "a side resolving to a single-tab window is believed" panel.lua \
+  's/        if #pane\.tabIds ~= 1 then return true end/        if false then return true end/'
+run_mut "a window the user opened becomes a pane by having a tab dropped in it" panel.lua \
+  's/      candidate = \(managed\[w:id\(\)\] ~= nil\) and not w:isMinimized\(\),/      candidate = not w:isMinimized(),/'
+run_mut "two tabs with the same folder name are guessed at" panel.lua \
+  's/        if several then\n          log\.w\(string\.format\(/        if false then\n          log.w(string.format(/s'
+run_mut "tabs no tab bar accounts for are dropped anyway" panel.lua \
+  's/    if not accounted\[id\] then\n      log\.i\(string\.format\(/    if false then\n      log.i(string.format(/s'
+run_mut "a side is handed a window holding none of its tabs" panel.lua \
+  's/      if i ~= j and a\.score\.left > 0 and b\.score\.right > 0 then/      if i ~= j then/'
+run_mut "the window with the most of a side's tabs is not preferred" panel.lua \
+  's/        local key = \{ a\.score\.left \+ b\.score\.right, #a\.ids \+ #b\.ids, -a\.active, -b\.active \}/        local key = { 0, 0, -a.active, -b.active }/'
+run_mut "the side that lost its window keeps its ids" panel.lua \
+  's/      pane\.tabIds, pane\.activeId, pane\.frame, pane\.parked = \{\}, nil, nil, nil\n      pane\.minted = \{\}\n      log\.i\(string\.format\("regroup/      log.i(string.format("regroup/s'
+run_mut "provenance does not follow the tab to its new side" panel.lua \
+  's/    for _, id in ipairs\(panes\[side\]\.minted\) do wasMinted\[id\] = true end/    for _, id in ipairs({}) do wasMinted[id] = true end/'
+run_mut "a regrouped side that is on screen is recorded as put away" panel.lua \
+  's/      pane\.parked = \(not geometry\.isOnScreen\(pane\.frame\)\) and pane\.frame or nil/      pane.parked = pane.frame/'

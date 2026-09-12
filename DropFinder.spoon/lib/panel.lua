@@ -337,6 +337,315 @@ local function reorderByTabBar(side)
   pane.tabIds, pane.pathList = ids, paths
 end
 
+-- ── One side, one real window ──────────────────────────────────────────────
+-- A pane is a set of tab ids, and an id enters it through exactly three doors:
+-- create, adopt, reattach.  What that model has no door for is the tab the
+-- *user* drags out of one window and drops into another: the id does not change,
+-- the real window that owns it does, and nothing in either view says so.
+--
+-- Measured on the machine, after a drag that moved six of the left pane's tabs
+-- into the right pane's window: both windows then carried ids filed under
+-- "left", so paneWindow("left") resolved to whichever of them Accessibility
+-- offered -- the *right* pane's window, because the tab dragged into it had
+-- become its active one -- and every show()/hide() moved that window into the
+-- left slot while the real left window sat untouched in it.  The right side
+-- meanwhile had a live id (its own old tab, now a background tab of that same
+-- window) and no resolvable window at all, so it was never laid out and never
+-- rebuilt either.  Which window the hotkey grabbed even flipped from press to
+-- press, since switching tabs changes what the AX tree exposes.
+--
+-- The repair is to derive the sides from the windows rather than the other way
+-- round: group the managed ids by the real window that holds them, pair the two
+-- fullest windows with the sides they mostly came from, and take each side's tab
+-- list from its window's tab bar.  Nothing is moved, created or closed here.  A
+-- window that ends up with neither side is simply forgotten, which leaves it
+-- floating and therefore untouchable (requirement 4), and a side left with
+-- nothing is rebuilt from its remembered paths on the next show() the way any
+-- closed side is (requirement 5).
+
+--- Every id the model owns, with the side it is filed under and its known path.
+local function managedTabs()
+  local m = {}
+  for _, side in ipairs(SIDES) do
+    local pane = panes[side]
+    for i, id in ipairs(pane.tabIds) do
+      m[id] = { side = side, path = pane.pathList[i] or "" }
+    end
+  end
+  return m
+end
+
+--- Is the model's idea of which window holds what still true?
+-- One question per side, asked of the window that side resolves to: are the tabs
+-- in it the tabs this side thinks it has?  Folder names are all the tab bar
+-- states, but a different bag of names is a different set of tabs whichever order
+-- they are in -- and any drag shows up in the bag of the window the tab left as
+-- well as the one it arrived in, so a side that has become unresolvable
+-- altogether (the way the right one had on the machine) is still noticed through
+-- the window that took its tab.
+--
+-- Cheap, and quiet in the normal case: one tab bar read per side off the AX
+-- snapshot the reconcile just took.
+--@return boolean
+local function needsRegroup()
+  -- Nothing to learn from a blind AX tree (locked screen, another Space, a
+  -- Finder that has just relaunched) -- and everything to lose by acting on it.
+  if not next(axById) then return false end
+  for _, side in ipairs(SIDES) do
+    local pane = panes[side]
+    -- A minimized window puts every tab in the AX tree, so its handles cannot be
+    -- told apart from separate windows; and a rebuild in flight is mid-way
+    -- through changing the very thing being checked.
+    if pane.collapsed or pane.pending or draining[side] then return false end
+    for _, id in ipairs(pane.tabIds) do
+      if isFresh(id) then return false end
+    end
+  end
+
+  for _, side in ipairs(SIDES) do
+    local pane = panes[side]
+    local w = #pane.tabIds > 0 and paneWindow(side) or nil
+    if w then
+      local titles = finder.tabTitles(w)
+      if #titles == 0 then
+        -- Measured: a single-tab window has no tab bar at all.
+        if #pane.tabIds ~= 1 then return true end
+      elseif #titles ~= #pane.tabIds then
+        return true
+      else
+        local bag = {}
+        for _, t in ipairs(titles) do bag[t] = (bag[t] or 0) + 1 end
+        for _, path in ipairs(pane.pathList) do
+          local b = basename(path)
+          if not bag[b] or bag[b] == 0 then return true end
+          bag[b] = bag[b] - 1
+        end
+      end
+    end
+  end
+  return false
+end
+
+--- Which managed ids does each real window actually hold?
+-- The tab bar is the only witness.  Its selected entry is pinned by the window's
+-- own id -- that is the one thing Accessibility states rather than implies -- and
+-- the rest are matched by folder name, the same way reorderByTabBar does it.
+--
+-- Only a window whose *own* active tab is one of ours can become a pane.  That is
+-- the discipline paneWindow has always followed, and it is what keeps
+-- requirement 2 across a drag: a window the user opened that a tab of ours was
+-- dropped into is showing its own tab, so it is not a candidate, the tab leaves
+-- the model instead, and the window is never moved, resized or closed.  (What is
+-- deliberately not defended against is the user dragging a whole pane into a
+-- window of their own and leaving one of our tabs selected in it: that is not
+-- DropFinder adopting anything, it is the user moving the pane.)
+--
+-- Being managed is the whole test, without a look at provenance: every id in the
+-- model was minted by us on the way in, and asking for the mint as well would
+-- only make a side unregroupable once Finder had stopped listing one of its tabs
+-- long enough for pruneMinted to forget it.
+--
+-- A non-candidate's tab bar is still read, though: that is the difference between
+-- "that tab of mine is over there now" and "I cannot see where that tab of mine
+-- is", and only the second one has to stop everything.
+--@return table[]|nil  groups, or nil when the answer would be a guess
+local function groupManagedByWindow(managed)
+  local wins, taken = {}, {}
+  for _, w in ipairs(finder.axWindows()) do
+    local titles, sel = finder.tabTitles(w)
+    wins[#wins + 1] = {
+      w = w, titles = titles or {}, sel = sel, slot = {},
+      -- A minimized window puts every one of its tabs in the AX tree, so its
+      -- handles cannot be told apart from separate windows.  It can still
+      -- account for tabs; it just cannot be handed a side.
+      candidate = (managed[w:id()] ~= nil) and not w:isMinimized(),
+    }
+  end
+
+  for _, g in ipairs(wins) do
+    if g.candidate then
+      local id = g.w:id()
+      -- Measured: a single-tab window has no tab bar at all.  A handle to a tab
+      -- that is not its window's active one has none either, which is the same
+      -- reading for a very different situation -- hence the accounting below.
+      if g.sel and g.titles[g.sel] then g.slot[g.sel] = id else g.single = id end
+      taken[id] = true
+    end
+  end
+
+  for _, g in ipairs(wins) do
+    for i, t in ipairs(g.titles) do
+      if not g.slot[i] then
+        local found, several = nil, false
+        for id, m in pairs(managed) do
+          if not taken[id] and basename(m.path) == t then
+            if found then several = true; break end
+            found = id
+          end
+        end
+        -- Two of our tabs whose folders share a name: which window holds which
+        -- cannot be told, and a guess here would move the wrong window and
+        -- persist the wrong paths.
+        if several then
+          log.w(string.format(
+            "regroup: more than one managed tab is called %q; " ..
+            "cannot tell which window holds which, leaving the model alone", t))
+          return nil
+        end
+        -- No candidate at all is not ambiguity: that entry is a tab of someone
+        -- else's making, sitting in one of our windows.  It stays out of the model.
+        if found then g.slot[i] = found; taken[found] = true end
+      end
+    end
+  end
+
+  -- Every tab the model owns has to turn up somewhere before any of them may be
+  -- moved between sides or dropped.  This is what separates a tab the user
+  -- dragged into a window we do not manage -- accounted for, so it can leave the
+  -- model -- from a tab bar that simply could not be read, which is what a
+  -- handle to a non-active tab looks like: a window claiming to hold one tab
+  -- while it holds three.  Acting on that reading throws away real tabs, so an
+  -- incomplete picture means no regroup at all.
+  local accounted = {}
+  for _, g in ipairs(wins) do
+    if g.single then accounted[g.single] = true end
+    for _, id in pairs(g.slot) do accounted[id] = true end
+  end
+  for id in pairs(managed) do
+    if not accounted[id] then
+      log.i(string.format(
+        "regroup: no tab bar accounts for tab %d (%s); leaving the model alone",
+        id, tostring(managed[id].path)))
+      return nil
+    end
+  end
+
+  local out = {}
+  for _, g in ipairs(wins) do
+    if g.candidate then
+      local ids, paths, score = {}, {}, { left = 0, right = 0 }
+      local function add(id)
+        ids[#ids + 1]     = id
+        paths[#paths + 1] = managed[id].path
+        score[managed[id].side] = score[managed[id].side] + 1
+      end
+      if g.single then
+        add(g.single)
+      else
+        for i = 1, #g.titles do
+          if g.slot[i] then add(g.slot[i]) end
+        end
+      end
+      out[#out + 1] = { w = g.w, active = g.w:id(), ids = ids, paths = paths, score = score }
+    end
+  end
+  -- Deepest first, and by id when two are the same size, so the pairing below
+  -- does not depend on the order Accessibility happened to answer in.
+  table.sort(out, function(a, b)
+    if #a.ids ~= #b.ids then return #a.ids > #b.ids end
+    return a.active < b.active
+  end)
+  return out
+end
+
+--- Hand each side the window its tabs mostly came from.
+-- Every ordered pair of candidates is scored by how many of their tabs are
+-- already filed under the side they would take, and the best pair wins; ties go
+-- to the pair holding more tabs and then to the lower window ids, so the answer
+-- does not depend on the order Accessibility answered in.
+--
+-- A window may only take a side it has at least one tab of.  Without that, a tab
+-- dragged out into a window of its own would be handed the side whose own window
+-- was closed -- DropFinder adopting a window off the back of a drag, which is
+-- requirement 2 the long way round.  The tab leaves the model instead, the window
+-- is left exactly where the user dropped it, and the empty side is rebuilt from
+-- its remembered paths on the next show() like any closed side.
+--@return table  side -> group (either side may be absent)
+local function pairWithSides(groups)
+  local best, bestKey = {}, nil
+  local function better(key)
+    if not bestKey then return true end
+    for i = 1, #key do
+      if key[i] ~= bestKey[i] then return key[i] > bestKey[i] end
+    end
+    return false
+  end
+  for i, a in ipairs(groups) do
+    for j, b in ipairs(groups) do
+      if i ~= j and a.score.left > 0 and b.score.right > 0 then
+        local key = { a.score.left + b.score.right, #a.ids + #b.ids, -a.active, -b.active }
+        if better(key) then best, bestKey = { left = a, right = b }, key end
+      end
+    end
+  end
+  if bestKey then return best end
+  -- No pair works, so at most one side has a window at all.
+  for _, side in ipairs(SIDES) do
+    for _, g in ipairs(groups) do
+      if g.score[side] > 0 then
+        local key = { g.score[side], #g.ids, -g.active }
+        if better(key) then best, bestKey = { [side] = g }, key end
+      end
+    end
+  end
+  return best
+end
+
+--- Rewrite the panes from the windows.  Model only: nothing here touches Finder.
+local function regroupPanes()
+  local managed = managedTabs()
+  local groups  = groupManagedByWindow(managed)
+  if not groups then return end
+  local assign  = pairWithSides(groups)
+  if not (assign.left or assign.right) then
+    log.w("regroup: none of the panel's windows is showing one of its own tabs; leaving the model alone")
+    return
+  end
+
+  -- Provenance follows the tab: an id we minted is still one of ours whichever
+  -- side it ended up on, so the two lists are pooled and dealt out again.
+  local wasMinted = {}
+  for _, side in ipairs(SIDES) do
+    for _, id in ipairs(panes[side].minted) do wasMinted[id] = true end
+  end
+  local kept = {}
+
+  for _, side in ipairs(SIDES) do
+    local pane, g = panes[side], assign[side]
+    if g then
+      pane.tabIds, pane.pathList = g.ids, g.paths
+      pane.activeId = g.active
+      local idx = indexOfId(pane, pane.activeId)
+      if idx then pane.activePath = pane.pathList[idx] end
+      pane.frame = g.w:frame()
+      -- The window may not be the one this side was parked as, so the remembered
+      -- park rect is worthless; geometry answers the only question it was asked.
+      pane.parked = (not geometry.isOnScreen(pane.frame)) and pane.frame or nil
+      local minted = {}
+      for _, id in ipairs(pane.tabIds) do
+        kept[id] = true
+        if wasMinted[id] then minted[#minted + 1] = id end
+      end
+      pane.minted = minted
+      log.i(string.format("regroup: %s is window %d now, %d tab(s), active %s",
+                          side, g.active, #pane.tabIds, tostring(pane.activePath)))
+    else
+      -- Every tab this side had is in the other side's window now.  pathList and
+      -- activePath stay: they are the recipe the next show() rebuilds from.
+      pane.tabIds, pane.activeId, pane.frame, pane.parked = {}, nil, nil, nil
+      pane.minted = {}
+      log.i(string.format("regroup: %s has no window of its own any more; " ..
+                          "it will be rebuilt from %s", side, tostring(pane.activePath)))
+    end
+  end
+
+  for id, m in pairs(managed) do
+    if not kept[id] then
+      log.i(string.format("regroup: tab %d (%s) left the panel", id, tostring(m.path)))
+    end
+  end
+end
+
 -- ── Reconcile: read-only sync with reality ─────────────────────────────────
 
 --- Bring the pane model back in line with Finder.  Reads only; never moves,
@@ -454,6 +763,11 @@ function M.reconcile()
       pane.frame     = nil
     end
   end
+
+  -- Last, because it needs the pruned model and the AX snapshot above, and
+  -- because what it repairs is the one thing the model cannot express: a tab the
+  -- user dragged from one of the panel's windows into the other.
+  if needsRegroup() then regroupPanes() end
 
   return true
 end

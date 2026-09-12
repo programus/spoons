@@ -1897,7 +1897,7 @@ end
 -- have thrown them away.
 section("a tab appended without being selected is still adopted")
 do
-  local p2, w2 = boot()
+  local p2, w2, _, geometry = boot()
   p2.show(); w2.drain()
   local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
   local id = w2.addBackgroundTab(lw, "/Applications")
@@ -1922,7 +1922,20 @@ do
   local untracked = w2.addBackgroundTab(lw, "/usr")   -- never announced
   local fl = w2.newWindow({ "/etc" }, { x = pane.frame.x, y = pane.frame.y,
                                         w = pane.frame.w, h = pane.frame.h })
-  p2.onWindowCreated(w2.mkwin(fl, 1)); w2.drain()
+  local flx, fly = fl.frame.x, fl.frame.y
+  p2.onWindowCreated(w2.mkwin(fl, 1))
+
+  -- Before draining, because this is the one moment a mistake here cannot be
+  -- taken back: a tab just adopted is a fresh tab, the regroup leaves fresh tabs
+  -- alone for a second or two, and a press in that gap parks whatever the side
+  -- resolves to.  Take the window and the next press takes it away with the panel.
+  p2.hide(); w2.drain()
+  ck("a press straight afterwards did not park the window the user opened",
+     fl.frame.x == flx and fl.frame.y == fly, fl.frame.x .. "," .. fl.frame.y)
+  ck("it parked the pane's own window instead",
+     not geometry.isOnScreen(w2.windowOfId(pane.tabIds[1]).frame))
+  p2.show(); w2.drain()
+
   ck("the floating window was not adopted", p2.sideOfTab(fl.tabs[1].id) == nil)
   ck("the pane gained nothing from it", #paneOf(p2, "left").tabIds == before,
      #paneOf(p2, "left").tabIds)
@@ -1936,7 +1949,7 @@ end
 -- from the outside exactly like the case above, minus that growth.
 section("a tab appended to a floating window at the pane's place is left alone")
 do
-  local p2, w2 = boot()
+  local p2, w2, _, _, store = boot()
   p2.show(); w2.drain()
   local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
   w2.addTab(lw, "/Applications")
@@ -1955,6 +1968,15 @@ do
      tostring(p2.sideOfTab(id)))
   ck("and still owns two", #paneOf(p2, "left").tabIds == 2,
      #paneOf(p2, "left").tabIds)
+  -- The model recovers from a mistake here on its own -- the regroup gives back
+  -- any tab of ours a window we do not manage turns out to be holding -- but the
+  -- record on disk does not: a persist that happened while the tab was ours
+  -- leaves its path in the recipe, and a Finder restart would then rebuild
+  -- someone else's tab as one of the panel's.
+  local st = store.load()
+  ck("and the recipe on disk never mentioned it",
+     table.concat(st.panes.left.paths, "|"):find("/usr", 1, true) == nil,
+     table.concat(st.panes.left.paths, "|"))
 end
 
 -- ══ 47. an interrupted rebuild must not be a lost rebuild ══════════════════
@@ -2344,6 +2366,516 @@ do
   ck("and the floater was left where it was made",
      w2.windowOfId(fid).frame.x == 100 and w2.windowOfId(fid).frame.y == 100,
      w2.windowOfId(fid).frame.x .. "," .. w2.windowOfId(fid).frame.y)
+end
+
+-- ══ 12. a tab the user dragged between windows ══════════════════════════════
+-- The model has no door for this: the id does not change, the real window that
+-- owns it does.  Reported from the machine as "the right window vanished, and it
+-- turned out to be sitting on top of the left one".
+
+local function idOfPath(panel, side, path)
+  local pane = panel.panes()[side]
+  for i, p in ipairs(pane.pathList) do
+    if p == path then return pane.tabIds[i] end
+  end
+  return nil
+end
+local function ownerOf(world, id)
+  return world.windowOfId(id)
+end
+local function addTabs(panel, world, rw, paths)
+  for _, p in ipairs(paths) do
+    world.addTab(rw, p)
+    panel.onWindowCreated(world.mkwin(rw, rw.active))
+    world.drain()
+  end
+end
+
+section("a tab dragged into the other pane's window changes sides")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local R = ownerOf(w2, paneOf(p2, "right").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications", "/usr" })
+  ck("left holds three tabs", #paneOf(p2, "left").tabIds == 3, #paneOf(p2, "left").tabIds)
+
+  local moved = idOfPath(p2, "left", "/Applications")
+  w2.moveTabToWindow(moved, R)
+  local before = #w2.windows
+  ck("neither view announces the drag",
+     #w2.finder.snapshot() == 4 and #w2.finder.axWindows() == 2)
+
+  p2.reconcile()
+  ck("the tab is filed under right now", p2.sideOfTab(moved) == "right",
+     tostring(p2.sideOfTab(moved)))
+  ck("left kept the other two", #paneOf(p2, "left").tabIds == 2, #paneOf(p2, "left").tabIds)
+  ck("right has its own tab and the one that arrived",
+     #paneOf(p2, "right").tabIds == 2, #paneOf(p2, "right").tabIds)
+  ck("right's active tab is the one that arrived",
+     paneOf(p2, "right").activeId == moved, tostring(paneOf(p2, "right").activeId))
+  ck("its path came with it",
+     paneOf(p2, "right").pathList[2] == "/Applications",
+     tostring(paneOf(p2, "right").pathList[2]))
+  ck("nothing was created or closed", #w2.windows == before, #w2.windows)
+  ck("each side still resolves to its own window",
+     ownerOf(w2, paneOf(p2, "left").activeId) == L
+     and ownerOf(w2, paneOf(p2, "right").activeId) == R)
+end
+
+section("a pane spread over two windows gets one window per side back")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local R = ownerOf(w2, paneOf(p2, "right").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications", "/usr", "/private/tmp", "/Library" })
+  ck("left holds five tabs", #paneOf(p2, "left").tabIds == 5, #paneOf(p2, "left").tabIds)
+  local lf0 = frameOf(p2, "left")
+
+  -- The drag that produced the defect: two of the left pane's tabs into the right
+  -- pane's window, the last of them left active there.  Both windows now hold ids
+  -- filed under "left", which is the state in which paneWindow("left") answered
+  -- with the *right* pane's window and every press moved that one into the left
+  -- slot.
+  -- Order matters, and this is the order that bit: the tab left active in the
+  -- right window comes *earlier* in the left pane's own list than the tab its own
+  -- window is showing, so "the first of my ids Accessibility can resolve" answers
+  -- with the right pane's window.
+  for _, path in ipairs({ "/Library", "/usr" }) do
+    w2.moveTabToWindow(idOfPath(p2, "left", path), R)
+  end
+  local before = #w2.windows
+  p2.reconcile()
+
+  ck("left is still the window it started in",
+     ownerOf(w2, paneOf(p2, "left").activeId) == L)
+  ck("right is still the window it started in",
+     ownerOf(w2, paneOf(p2, "right").activeId) == R)
+  ck("left owns what its window holds", #paneOf(p2, "left").tabIds == 3,
+     #paneOf(p2, "left").tabIds)
+  ck("right owns what its window holds", #paneOf(p2, "right").tabIds == 3,
+     #paneOf(p2, "right").tabIds)
+  local all = {}
+  for _, side in ipairs({ "left", "right" }) do
+    for _, p in ipairs(paneOf(p2, side).pathList) do all[p] = (all[p] or 0) + 1 end
+  end
+  ck("every path is still in the model exactly once",
+     all["/usr"] == 1 and all["/Library"] == 1 and all["/Applications"] == 1
+     and all["/private/tmp"] == 1 and all[HOME] == 1 and all[HOME .. "/Downloads"] == 1)
+  ck("in tab-bar order on the side that received them",
+     table.concat(paneOf(p2, "right").pathList, "|") == HOME .. "|/Library|/usr",
+     table.concat(paneOf(p2, "right").pathList, "|"))
+  ck("nothing was created or closed", #w2.windows == before, #w2.windows)
+
+  -- And the layout follows: one window per slot, the left one right where it was.
+  p2.hide(); w2.drain()
+  p2.show(); w2.drain()
+  local lf, rf = frameOf(p2, "left"), frameOf(p2, "right")
+  ck("the left window is back in the left slot",
+     lf ~= nil and lf.x == lf0.x and lf.y == lf0.y and lf.w == lf0.w,
+     lf and (lf.x .. "," .. lf.y) or "no window")
+  ck("the right window is in the right slot, not on top of the left one",
+     lf ~= nil and rf ~= nil and rf.x == lf.x + lf.w,
+     rf and rf.x or "no window")
+  ck("and they are still two different windows",
+     ownerOf(w2, paneOf(p2, "left").activeId) ~= ownerOf(w2, paneOf(p2, "right").activeId))
+end
+
+section("a tab dragged out into a window of its own leaves the panel")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications", "/usr" })
+  local gone = idOfPath(p2, "left", "/usr")
+  local nw = w2.detachTab(gone)
+  local before = #w2.windows
+  p2.reconcile()
+
+  ck("the tab is not the panel's any more", p2.sideOfTab(gone) == nil,
+     tostring(p2.sideOfTab(gone)))
+  ck("left kept the two that stayed", #paneOf(p2, "left").tabIds == 2,
+     #paneOf(p2, "left").tabIds)
+  ck("right was not touched by any of it", #paneOf(p2, "right").tabIds == 1,
+     #paneOf(p2, "right").tabIds)
+  ck("the side did not take the new window instead",
+     ownerOf(w2, paneOf(p2, "left").activeId) == L)
+  ck("nothing was created or closed", #w2.windows == before, #w2.windows)
+
+  p2.hide(); w2.drain()
+  ck("and the window the tab was dropped into stays where the user dropped it",
+     nw.frame.x == 140 and nw.frame.y == 140, nw.frame.x .. "," .. nw.frame.y)
+end
+
+section("a drag that cannot be read leaves the model alone")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local R = ownerOf(w2, paneOf(p2, "right").tabIds[1])
+  addTabs(p2, w2, L, { "/private/tmp/bin" })
+  addTabs(p2, w2, R, { "/usr/bin" })
+  local moved = idOfPath(p2, "left", "/private/tmp/bin")
+  w2.moveTabToWindow(moved, R)
+  -- The user switched back to the tab that was active before, so neither "bin"
+  -- is the selected entry that would pin it: the tab bar reads
+  -- [wangyuan | bin | bin] and nothing says which bin is which.
+  R.active = 1
+  p2.reconcile()
+  ck("the tab is still filed where it was", p2.sideOfTab(moved) == "left",
+     tostring(p2.sideOfTab(moved)))
+  ck("both sides keep the tabs they had",
+     #paneOf(p2, "left").tabIds == 2 and #paneOf(p2, "right").tabIds == 2,
+     #paneOf(p2, "left").tabIds .. "/" .. #paneOf(p2, "right").tabIds)
+  ck("and no path was lost",
+     table.concat(paneOf(p2, "left").pathList, "|"):find("/private/tmp/bin", 1, true) ~= nil,
+     table.concat(paneOf(p2, "left").pathList, "|"))
+end
+
+section("a minimized pane is not regrouped")
+do
+  local p2, w2 = boot({ hideMode = "minimize" })
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications" })
+  p2.hide(); w2.drain()
+  ck("both sides are collapsed", paneOf(p2, "left").collapsed
+     and paneOf(p2, "right").collapsed)
+  -- Minimized, Finder puts every tab of the window in the AX tree, so its handles
+  -- cannot be told from separate windows -- exactly the reading that would look
+  -- like a pane spread over two of them.
+  p2.reconcile()
+  ck("left still owns both its tabs", #paneOf(p2, "left").tabIds == 2,
+     #paneOf(p2, "left").tabIds)
+  ck("right still owns its own", #paneOf(p2, "right").tabIds == 1,
+     #paneOf(p2, "right").tabIds)
+  p2.show(); w2.drain()
+  ck("and both come back", #paneOf(p2, "left").tabIds == 2
+     and #paneOf(p2, "right").tabIds == 1)
+end
+
+local function mintedHas(panel, side, id)
+  for _, m in ipairs(paneOf(panel, side).minted) do
+    if m == id then return true end
+  end
+  return false
+end
+
+section("the tab a side was resolving through is the one that moved")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local R = ownerOf(w2, paneOf(p2, "right").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications" })
+  -- The user switched back to the first tab, so that is the one the model calls
+  -- active -- and it is the one they then drag across.  What makes this the
+  -- narrow case: the window it lands in ends up holding exactly as many tabs as
+  -- the left side owns, so nothing but the folder names says anything is wrong.
+  L.active = 1
+  p2.reconcile()
+  local moved = idOfPath(p2, "left", HOME .. "/Downloads")
+  ck("the model was resolving left through that tab",
+     paneOf(p2, "left").activeId == moved, tostring(paneOf(p2, "left").activeId))
+  w2.moveTabToWindow(moved, R)
+  local before = #w2.windows
+  ck("and the counts alone say nothing",
+     #w2.finder.tabTitles(w2.mkwin(R, R.active)) == #paneOf(p2, "left").tabIds)
+
+  p2.reconcile()
+  ck("the tab is filed under right now", p2.sideOfTab(moved) == "right",
+     tostring(p2.sideOfTab(moved)))
+  ck("left is the window it never left",
+     ownerOf(w2, paneOf(p2, "left").activeId) == L)
+  ck("left kept the one tab that stayed", #paneOf(p2, "left").tabIds == 1,
+     #paneOf(p2, "left").tabIds)
+  ck("right holds both of its own now", #paneOf(p2, "right").tabIds == 2,
+     #paneOf(p2, "right").tabIds)
+  ck("provenance went with the tab", mintedHas(p2, "right", moved))
+  ck("and did not stay behind", not mintedHas(p2, "left", moved))
+  ck("nothing was created or closed", #w2.windows == before, #w2.windows)
+end
+
+section("a tab dropped into a window the user opened leaves the panel")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications" })
+  local F = w2.newWindow({ "/etc" }, { x = 300, y = 200, w = 800, h = 440 })
+  local gone = idOfPath(p2, "left", "/Applications")
+  w2.moveTabToWindow(gone, F)
+  -- ... and the user carried on in the tab that window came with, so nothing of
+  -- ours is active in it: it is a window we may read but never take.
+  F.active = 1
+  local before = #w2.windows
+  p2.reconcile()
+
+  ck("the tab is not the panel's any more", p2.sideOfTab(gone) == nil,
+     tostring(p2.sideOfTab(gone)))
+  ck("left kept the one that stayed", #paneOf(p2, "left").tabIds == 1,
+     #paneOf(p2, "left").tabIds)
+  ck("left is still its own window", ownerOf(w2, paneOf(p2, "left").activeId) == L)
+  ck("the side was not handed the user's window instead",
+     ownerOf(w2, paneOf(p2, "left").activeId) ~= F
+     and ownerOf(w2, paneOf(p2, "right").activeId) ~= F)
+  ck("nothing was created or closed", #w2.windows == before, #w2.windows)
+
+  p2.hide(); w2.drain()
+  ck("and the user's window is where the user left it",
+     F.frame.x == 300 and F.frame.y == 200 and F.frame.w == 800,
+     F.frame.x .. "," .. F.frame.y .. " " .. F.frame.w)
+end
+
+section("a side whose own window is gone is not handed one of someone else's")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications" })
+  w2.closeTabById(paneOf(p2, "right").tabIds[1])   -- the whole right window
+  p2.reconcile()
+  ck("right is gone", #paneOf(p2, "right").tabIds == 0, #paneOf(p2, "right").tabIds)
+  -- A tab dragged out onto the desktop is now the only other Finder window
+  -- there is.  Handing it to the side that lost its own would be DropFinder
+  -- adopting a window the user made, by the back door.
+  local gone = idOfPath(p2, "left", "/Applications")
+  local nw = w2.detachTab(gone)
+  local before = #w2.windows
+  p2.reconcile()
+
+  ck("the dragged-out tab left the panel", p2.sideOfTab(gone) == nil,
+     tostring(p2.sideOfTab(gone)))
+  ck("right did not take that window", #paneOf(p2, "right").tabIds == 0,
+     #paneOf(p2, "right").tabIds)
+  ck("left is still its own window", ownerOf(w2, paneOf(p2, "left").activeId) == L)
+  ck("nothing was created or closed here", #w2.windows == before, #w2.windows)
+
+  p2.show(); w2.drain()
+  ck("the next press rebuilds right instead", #w2.windows == before + 1, #w2.windows)
+  ck("at the path it remembered", paneOf(p2, "right").pathList[1] == HOME,
+     tostring(paneOf(p2, "right").pathList[1]))
+  ck("and the dragged-out window was never moved",
+     nw.frame.x == 140 and nw.frame.y == 140, nw.frame.x .. "," .. nw.frame.y)
+end
+
+section("each side keeps the window most of its tabs are in")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local R = ownerOf(w2, paneOf(p2, "right").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications", "/usr" })
+  addTabs(p2, w2, R, { "/Library" })
+  -- Tabs went both ways, so both windows hold tabs of both sides and both
+  -- readings are self-consistent.  Only the count decides: two of left's three
+  -- tabs are still in L, so L is left.
+  w2.moveTabToWindow(idOfPath(p2, "left", "/usr"), R)
+  w2.moveTabToWindow(idOfPath(p2, "right", "/Library"), L)
+  local before = #w2.windows
+  p2.reconcile()
+
+  ck("left is the window that kept most of it",
+     ownerOf(w2, paneOf(p2, "left").activeId) == L)
+  ck("right is the other one", ownerOf(w2, paneOf(p2, "right").activeId) == R)
+  ck("left owns the three tabs in it", #paneOf(p2, "left").tabIds == 3,
+     #paneOf(p2, "left").tabIds)
+  ck("in tab-bar order",
+     table.concat(paneOf(p2, "left").pathList, "|")
+       == HOME .. "/Downloads|/Applications|/Library",
+     table.concat(paneOf(p2, "left").pathList, "|"))
+  ck("right owns the two in it",
+     table.concat(paneOf(p2, "right").pathList, "|") == HOME .. "|/usr",
+     table.concat(paneOf(p2, "right").pathList, "|"))
+  ck("nothing was created or closed", #w2.windows == before, #w2.windows)
+end
+
+section("the side whose every tab moved away is rebuilt, not left pointing at them")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local moved = paneOf(p2, "right").tabIds[1]
+  local before = #w2.windows
+  w2.moveTabToWindow(moved, L)                     -- the right pane's only tab
+  p2.reconcile()
+
+  ck("the tab is left's now", p2.sideOfTab(moved) == "left",
+     tostring(p2.sideOfTab(moved)))
+  ck("left holds both", #paneOf(p2, "left").tabIds == 2, #paneOf(p2, "left").tabIds)
+  ck("right owns no ids at all", #paneOf(p2, "right").tabIds == 0,
+     #paneOf(p2, "right").tabIds)
+  ck("and nothing it could resolve", paneOf(p2, "right").activeId == nil,
+     tostring(paneOf(p2, "right").activeId))
+  ck("but it kept the recipe", paneOf(p2, "right").pathList[1] == HOME,
+     tostring(paneOf(p2, "right").pathList[1]))
+  ck("one window is left", #w2.windows == before - 1, #w2.windows)
+
+  p2.show(); w2.drain()
+  ck("the next press rebuilds it", #paneOf(p2, "right").tabIds == 1,
+     #paneOf(p2, "right").tabIds)
+  ck("as a window of its own",
+     ownerOf(w2, paneOf(p2, "right").activeId) ~= L
+     and ownerOf(w2, paneOf(p2, "right").activeId) ~= nil)
+  ck("and left still has the tab that came over", #paneOf(p2, "left").tabIds == 2,
+     #paneOf(p2, "left").tabIds)
+end
+
+section("two sides that swapped windows while away swap their park rects too")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local R = ownerOf(w2, paneOf(p2, "right").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications", "/usr" })
+  addTabs(p2, w2, R, { "/Library" })
+  p2.hide(); w2.drain()
+  ck("both sides are parked", paneOf(p2, "left").parked ~= nil
+     and paneOf(p2, "right").parked ~= nil)
+
+
+  -- Enough tabs went across that each side's best window is now the other's.
+  -- Both windows hold the same number of tabs as before, so only the names say so.
+  w2.moveTabToWindow(idOfPath(p2, "left", "/Applications"), R)
+  w2.moveTabToWindow(idOfPath(p2, "left", "/usr"), R)
+  w2.moveTabToWindow(idOfPath(p2, "right", "/Library"), L)
+  local before = #w2.windows
+  p2.reconcile()
+
+  ck("left is the window that has most of it now",
+     ownerOf(w2, paneOf(p2, "left").activeId) == R)
+  ck("right is the other one", ownerOf(w2, paneOf(p2, "right").activeId) == L)
+  -- Both sides park in the same corner, so the rects themselves cannot tell the
+  -- swap: what has to hold is that each side's park rect is the rect of the
+  -- window it owns now, so a display change re-parks the right window.
+  for _, side in ipairs({ "left", "right" }) do
+    local pane = paneOf(p2, side)
+    local rw = ownerOf(w2, pane.activeId)
+    ck(side .. "'s park rect is the rect of the window it took",
+       pane.parked ~= nil and pane.parked.x == rw.frame.x
+       and pane.parked.y == rw.frame.y and pane.parked.w == rw.frame.w,
+       pane.parked and (pane.parked.x .. "," .. pane.parked.y) or "nil")
+  end
+  ck("the panel is still away", p2.state() == "hidden", p2.state())
+  ck("nothing was created or closed", #w2.windows == before, #w2.windows)
+
+  p2.show(); w2.drain()
+  local lf, rf = frameOf(p2, "left"), frameOf(p2, "right")
+  ck("and it comes back one window per slot",
+     lf ~= nil and rf ~= nil and rf.x == lf.x + lf.w,
+     (lf and lf.x or "nil") .. " / " .. (rf and rf.x or "nil"))
+end
+
+-- The other half of that recompute.  `parked` means "we put this away and have
+-- not shown it since", and a display change acts on it: a stale one on a panel
+-- that is up would park a panel the user is working in.
+section("a swap while the panel is up is not mistaken for a park")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local R = ownerOf(w2, paneOf(p2, "right").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications", "/usr" })
+  addTabs(p2, w2, R, { "/Library" })
+  w2.moveTabToWindow(idOfPath(p2, "left", "/Applications"), R)
+  w2.moveTabToWindow(idOfPath(p2, "left", "/usr"), R)
+  w2.moveTabToWindow(idOfPath(p2, "right", "/Library"), L)
+  p2.reconcile()
+  ck("the sides swapped windows", ownerOf(w2, paneOf(p2, "left").activeId) == R)
+  ck("neither is recorded as put away", paneOf(p2, "left").parked == nil
+     and paneOf(p2, "right").parked == nil)
+
+  p2.onScreensChanged(); w2.drain()
+  ck("so a display change lays the panel out instead of parking it",
+     p2.state() ~= "hidden", p2.state())
+  local lf, rf = frameOf(p2, "left"), frameOf(p2, "right")
+  ck("both panes on the grid", lf ~= nil and rf ~= nil and rf.x == lf.x + lf.w,
+     (lf and lf.x or "nil") .. " / " .. (rf and rf.x or "nil"))
+end
+
+section("Accessibility going blind changes nothing")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  addTabs(p2, w2, L, { "/Applications" })
+  local paths = table.concat(paneOf(p2, "left").pathList, "|")
+  -- A locked screen, another Space, a Finder that has just come back: the AX
+  -- tree answers with nothing at all, which is not the same as "your windows
+  -- hold nothing".
+  w2.axBlindRounds = 3
+  p2.reconcile()
+  ck("left kept every tab", table.concat(paneOf(p2, "left").pathList, "|") == paths,
+     table.concat(paneOf(p2, "left").pathList, "|"))
+  ck("right too", #paneOf(p2, "right").tabIds == 1, #paneOf(p2, "right").tabIds)
+  ck("and both are still the windows they were",
+     paneOf(p2, "left").tabIds[1] ~= nil and paneOf(p2, "right").tabIds[1] ~= nil)
+end
+
+-- The regroup above gives back a tab of ours that turns out to be in a window we
+-- do not manage -- but only when it can read which window holds what.  Two of our
+-- tabs with the same folder name and it declines, and then a window taken in
+-- error stays taken: the pane resolves to it and the next press parks a window
+-- the user opened.  So the two signals that decide adoption have to be right on
+-- their own, with nothing to fall back on.  Both sections below set up that
+-- ambiguity first: a "bin" in each pane, neither of them its window's selected
+-- entry, so nothing pins which is which.
+local function twoTabsCalledBin(p2, w2)
+  local L = ownerOf(w2, paneOf(p2, "left").tabIds[1])
+  local R = ownerOf(w2, paneOf(p2, "right").tabIds[1])
+  addTabs(p2, w2, L, { "/private/tmp/bin" })
+  addTabs(p2, w2, R, { "/usr/bin" })
+  L.active, R.active = 1, 1
+  p2.reconcile()
+  return L, R
+end
+
+section("a window the user opened is left alone with no regroup to fall back on")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local L = twoTabsCalledBin(p2, w2)
+  -- And the pane's own tab bar is one ahead of the model, the way it is when
+  -- Finder appends a tab without selecting it.  That is the growth this signal
+  -- looks for; a window of the user's arriving at the same moment must not be
+  -- read as it, and the id being in the AX tree at all is the difference.
+  w2.addBackgroundTab(L, "/etc/defaults")
+  local pf = paneOf(p2, "left").frame
+  local fl = w2.newWindow({ "/etc" }, { x = pf.x, y = pf.y, w = pf.w, h = pf.h })
+  local flx, fly = fl.frame.x, fl.frame.y
+
+  p2.onWindowCreated(w2.mkwin(fl, 1)); w2.drain()
+  ck("the window the user opened is not the panel's",
+     p2.sideOfTab(fl.tabs[1].id) == nil, tostring(p2.sideOfTab(fl.tabs[1].id)))
+  ck("left still owns the two tabs it made", #paneOf(p2, "left").tabIds == 2,
+     #paneOf(p2, "left").tabIds)
+  p2.hide(); w2.drain()
+  ck("and the panel went away without it",
+     fl.frame.x == flx and fl.frame.y == fly, fl.frame.x .. "," .. fl.frame.y)
+end
+
+section("a tab appended to the user's window is left alone the same way")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  twoTabsCalledBin(p2, w2)
+  local pf = paneOf(p2, "left").frame
+  local fl = w2.newWindow({ "/etc" }, { x = pf.x, y = pf.y, w = pf.w, h = pf.h })
+  -- Nothing about this one is in the AX tree, so only the count can speak for
+  -- it -- and the pane's tab bar is exactly as long as the model thinks it is,
+  -- which says the tab did not go into the pane.
+  local bg = w2.addBackgroundTab(fl, "/private/tmp/usr")
+  local flx, fly = fl.frame.x, fl.frame.y
+
+  p2.onWindowCreated(w2.mkwin(fl, #fl.tabs)); w2.drain()
+  ck("the tab in the user's window is not the panel's", p2.sideOfTab(bg) == nil,
+     tostring(p2.sideOfTab(bg)))
+  ck("left still owns the two tabs it made", #paneOf(p2, "left").tabIds == 2,
+     #paneOf(p2, "left").tabIds)
+  p2.hide(); w2.drain()
+  ck("and the panel went away without it",
+     fl.frame.x == flx and fl.frame.y == fly, fl.frame.x .. "," .. fl.frame.y)
 end
 
 print(string.format("\n%d passed, %d failed", pass, fail))

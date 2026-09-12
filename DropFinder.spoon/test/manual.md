@@ -1,10 +1,11 @@
 # The manual pass
 
-The offline suites run `lib/` against a simulator; these sixteen steps are the
-ones that need a real Finder, real windows and a real screen.  They come from the
-end of the implementation plan.  This file records the last time each was walked
-and, more usefully, **what walking them found that the simulator could not** —
-six defects, every one of them now fixed, covered offline and mutation-gated.
+The offline suites run `lib/` against a simulator; these seventeen steps are the
+ones that need a real Finder, real windows and a real screen.  The first sixteen
+come from the end of the implementation plan; the seventeenth was added by
+ordinary use.  This file records the last time each was walked and, more
+usefully, **what walking them found that the simulator could not** — seven
+defects, every one of them now fixed, covered offline and mutation-gated.
 
 Before running anything against the live machine, ask one question first:
 
@@ -39,6 +40,7 @@ passes were thrown away to that before the check became routine.
 | 14 | Second display, then unplug it while shown | **Verified by hand.** Both panes survive and are re-laid out on a remaining display. Plugging it back in leaves them where they are — see below |
 | 15 | Focus a floating window, adopt hotkey | Its tabs merge in order into the side nearer the mouse and the source window closes.  Live three-tab merge ended with model and Finder in exact agreement (`49085, 49087, 49089, 49090, 49092, 49103, 49104, 49105`) and no `is gone` line in the log |
 | 16 | `spoon.DropFinder:stop()` | Both sides come back on screen, nothing left in the Dock, hotkeys dead |
+| 17 | Drag a tab from one pane's tab bar into the other, then the hotkey | The sides swap over with the tabs: both windows still go to their own half, nothing is created or closed.  **Found here**, and re-walked after the fix — the press used to move one window twice and leave the other behind.  See below |
 
 ## Step 12 under `hideMode = "minimize"`, measured
 
@@ -165,3 +167,58 @@ moves it.
 The fallback path is what actually matters if `hs.spaces` is ever withdrawn, and
 that part *is* covered offline: absent, throwing, and claiming a move it did not
 make are three separate sections in `panel_spec.lua`.
+
+## Step 17, a tab dragged from one pane into the other
+
+Not from the plan — this one came out of using the panel.  After dragging a tab
+across, one press made the right window look like it had vanished: it had been
+moved to the *left* window's place, on top of it, and focus went back to the
+previous app as though nothing were on screen.
+
+What the machine actually held at that point, read with the panel put away:
+window A parked in the corner with 7 tabs, window B sitting in the left slot with
+7 tabs, and a model that had 13 ids on the left and 1 on the right.  The drag had
+taken six of the left side's tabs into the right side's window, so
+`paneWindow("left")` resolved through a tab that now lived in the right pane's
+window — both sides resolved to the *same* window, one moved it and the other
+moved it again, and the window nobody resolved to was never touched.  Nothing was
+lost; the model was simply pointing at the wrong window.
+
+The fix is in `reconcile()`, and it repairs the model without moving anything:
+each side's tabs are compared with the folder names in the tab bar of the window
+it resolves to, and a mismatch triggers a re-read of which window holds which of
+our tabs, after which each side is handed the window holding most of its own tabs
+and its paths, active tab, park rect and provenance move with it.  A drag shows
+up in both windows' tab bars, so the side that has lost its window entirely is
+noticed through the window that took its tab.  Covered offline by nine sections
+of `panel_spec.lua` and twelve mutants; what needed the machine was the
+observation itself, since the simulator was quite happy to model a drag nobody
+had thought to ask it about.
+
+Re-walked on the machine that was still in the broken state, without touching a
+window first.  A reload was enough:
+
+```
+regroup: left is window 53639 now, 7 tab(s), active /Users/wangyuan/
+regroup: right is window 53635 now, 7 tab(s), active .../data/new_patients/
+```
+
+13 + 1 became 7 + 7, in tab-bar order, with the model's `right` now holding the
+six tabs that had been dragged into that window — the drag was followed, not
+undone.  Then hide and show, measured:
+
+| | left | right | the floating window |
+|---|---|---|---|
+| before | `0,876` | `4440,1289` (parked) | `3200,777` |
+| after hide | `4440,1289` | `4440,1289` | `3200,777` |
+| after show | `0,876` | `1280,876` | `3200,777` |
+
+Both halves, one window each, 15 tabs in Finder throughout (14 in the panel, one
+floating), nothing created and nothing closed.  Both sides park in the same
+corner, which is why the two parked rects are identical — `parkRequest` has no
+per-side stagger, contrary to the plan's sketch of it.
+
+One thing seen only when driving this from the IPC client rather than the
+keyboard: after `show()` returned, `state()` said `shown_unfocused`.  The hotkey
+path is what steps 1--4 walked and it focuses correctly; a `show()` typed into
+`hs -c` while another app is frontmost is not the same race.

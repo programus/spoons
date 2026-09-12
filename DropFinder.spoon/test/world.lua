@@ -278,6 +278,42 @@ function W.new(screens, opts)
     end
   end
 
+  --- The user dragged a tab out of one window and dropped it into another.  The
+  --- id and the path go with it; the real window that owns it is what changes,
+  --- and Finder makes the tab active where it lands.  Nothing in either view
+  --- announces this: the snapshot lists the same ids as before and the AX tree
+  --- still hands over one window per real window.
+  function world.moveTabToWindow(id, dest, index)
+    for wi, rw in ipairs(world.windows) do
+      for ti, t in ipairs(rw.tabs) do
+        if t.id == id then
+          local tab = table.remove(rw.tabs, ti)
+          if #rw.tabs == 0 then table.remove(world.windows, wi)
+          elseif rw.active > #rw.tabs then rw.active = #rw.tabs end
+          local at = index or (#dest.tabs + 1)
+          table.insert(dest.tabs, at, tab)
+          dest.active = at
+          return tab.id
+        end
+      end
+    end
+    return nil
+  end
+
+  --- The user dragged a tab off its window and dropped it on the desktop: same
+  --- id, same path, a real window of its own at Finder's default position.
+  function world.detachTab(id, frame)
+    local rw = { tabs = {}, active = 1, minimized = false,
+                 frame = frame or { x = 140, y = 140, w = 920, h = 436 } }
+    world.windows[#world.windows + 1] = rw
+    local moved = world.moveTabToWindow(id, rw)
+    if not moved then table.remove(world.windows, #world.windows); return nil end
+    local active = world.spaceOfScreen[world.screenOfRW(rw)]
+    if active then world.spaceOfWindow[rw] = active end
+    world.zToFront(rw)
+    return rw
+  end
+
   function world.closeTabById(id)
     for wi, rw in ipairs(world.windows) do
       for ti, t in ipairs(rw.tabs) do
