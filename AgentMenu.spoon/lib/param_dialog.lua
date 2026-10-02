@@ -94,7 +94,9 @@ function M.show(paramDefs, cb)
   local h = math.max(140, 20 + totalRowH + 50)
   local w     = 400
   local mp     = hs.mouse.absolutePosition()
-  local screen = hs.screen.mainScreen():frame()
+  -- The screen under the mouse, not mainScreen(): without per-display Spaces
+  -- mainScreen() is always the primary display.
+  local screen = (hs.mouse.getCurrentScreen() or hs.screen.mainScreen()):frame()
   ---@type number
   local x = mp.x + 20
   ---@type number

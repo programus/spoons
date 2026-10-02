@@ -78,6 +78,8 @@ local currentState   = nil   -- "dot" | "button" | "menu"
 ---@type {x: number, y: number}|nil
 local dotCenter      = nil   -- anchor shared by both canvases
 ---@type table|nil
+local dotScreen      = nil   -- usable frame of the screen the selection is on
+---@type table|nil
 local hitCanvas      = nil   -- dot + button, built once
 ---@type table|nil
 local menuCanvas     = nil   -- action menu, rebuilt only when the menu changes
@@ -96,6 +98,22 @@ local menuItemRects  = {}    -- action name → absolute screen rect
 local labelWidths    = {}    -- label → measured width (labels come from config)
 ---@type function
 local transitionToMenu       -- defined below; referenced by the click tap
+
+-- Screen containing (x, y), or the nearest one when the point falls in a gap
+-- between displays.  Not hs.screen.mainScreen(): with "Displays have separate
+-- Spaces" turned off that is always the primary display, so a selection on any
+-- other screen got its dot clamped onto the primary display's edge.
+local function screenAt(x, y)
+  local best, bestD
+  for _, s in ipairs(hs.screen.allScreens()) do
+    local f  = s:fullFrame()
+    local dx = math.max(f.x - x, 0, x - (f.x + f.w))
+    local dy = math.max(f.y - y, 0, y - (f.y + f.h))
+    local d  = dx*dx + dy*dy
+    if not bestD or d < bestD then best, bestD = s, d end
+  end
+  return best or hs.screen.mainScreen()
+end
 
 -- ── Public callback setter ────────────────────────────────────────────────
 --- Register the callback invoked when an action is selected.
@@ -293,7 +311,7 @@ local function positionMenu(center)
   local c      = menuCanvas
   local menuW  = menuSize.w
   local menuH  = menuSize.h
-  local screen = hs.screen.mainScreen():frame()
+  local screen = dotScreen
 
   local mx = center.x - menuW / 2
   ---@type number
@@ -345,6 +363,7 @@ function M.hide()
   if hitCanvas  then hitCanvas:hide()  end
   currentState   = nil
   dotCenter      = nil
+  dotScreen      = nil
   currentActions = {}
   menuItemRects  = {}
 end
@@ -427,22 +446,24 @@ function M.show(actions, position)
   currentActions = actions
 
   -- Anchor point: right edge of selection or near the mouse cursor
-  local cx, cy
+  local cx, cy, screen
   if position then
     cx = position.x + position.w + 16
     cy = position.y + position.h / 2
+    screen = screenAt(position.x + position.w / 2, cy):frame()
   else
     local mp = hs.mouse.absolutePosition()
     cx = mp.x + 20
     cy = mp.y
+    screen = screenAt(mp.x, mp.y):frame()
   end
 
-  -- Clamp so the button/menu always fits on screen
-  local screen = hs.screen.mainScreen():frame()
+  -- Clamp so the button/menu always fits on the selection's screen
   cx = math.max(screen.x + BTN_D, math.min(cx, screen.x + screen.w - BTN_D))
   cy = math.max(screen.y + BTN_D, math.min(cy, screen.y + screen.h - BTN_D))
 
   dotCenter = { x = cx, y = cy }
+  dotScreen = screen
 
   if not hitCanvas then
     buildHitCanvas()

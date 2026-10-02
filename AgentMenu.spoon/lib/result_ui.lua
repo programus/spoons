@@ -85,7 +85,9 @@ local lastSize = { w = DEFAULT_W, h = DEFAULT_H }
 -- Compute a rect near the current mouse position, clamped to screen.
 local function rectNearMouse(w, h)
   local mp     = hs.mouse.absolutePosition()
-  local screen = hs.screen.mainScreen():frame()
+  -- The screen under the mouse, not mainScreen(): without per-display Spaces
+  -- mainScreen() is always the primary display.
+  local screen = (hs.mouse.getCurrentScreen() or hs.screen.mainScreen()):frame()
   ---@type number
   local x = mp.x + 20
   ---@type number
