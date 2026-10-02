@@ -20,6 +20,9 @@ local CLAMP_X, CLAMP_Y = 40, 52
 
 local function copy(r) return { x = r.x, y = r.y, w = r.w, h = r.h } end
 local function basename(p) return (p:match("([^/]+)/?$")) or p end
+-- Measured: Finder titles a tab with the folder's display name, so a
+-- `.localized` folder loses its extension in the tab bar and in `name of window`.
+local function displayName(p) return (basename(p):gsub("%.localized$", "")) end
 
 function W.new(screens, opts)
   opts = opts or {}
@@ -438,7 +441,7 @@ function W.new(screens, opts)
         -- of all of them: AppleScript leaves it out, AX still hands it over.
         local lagged = world.newTabLagged and world.newTabLagged.id == t.id
         if not lagged and not (world.snapshotOmits and world.snapshotOmits[t.id]) then
-          out[#out + 1] = { id = t.id, name = basename(t.path), path = t.path }
+          out[#out + 1] = { id = t.id, name = displayName(t.path), path = t.path }
         end
       end
     end
@@ -527,7 +530,7 @@ function W.new(screens, opts)
     -- selecting it.
     if not rw.minimized and win._tab and win._tab ~= rw.active then return {}, nil end
     local titles = {}
-    for _, t in ipairs(rw.tabs) do titles[#titles + 1] = basename(t.path) end
+    for _, t in ipairs(rw.tabs) do titles[#titles + 1] = displayName(t.path) end
     return titles, rw.active
   end
 

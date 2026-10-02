@@ -54,6 +54,13 @@ function S.install(screens, opts)
         if not exists(p) then return nil end
         return p
       end,
+      -- Real hs.fs.displayName answers nil for a path that does not resolve,
+      -- and drops `.localized` the way Finder's tab bar does.
+      displayName = function(p)
+        if not p or not exists(p) then return nil end
+        local b = normalise(p):match("([^/]+)$") or p
+        return (b:gsub("%.localized$", ""))
+      end,
       attributes = function(p, key)
         if not p or not exists(p) then return nil end
         local mode = isDir(p) and "directory" or "file"

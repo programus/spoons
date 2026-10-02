@@ -100,6 +100,18 @@ local function basename(p)
   return (tostring(p):match("([^/]+)/?$")) or p
 end
 
+--- What the tab bar calls the folder at `p`.
+-- Finder titles a tab with the folder's display name, which is not always its
+-- last path component: "Virtual Machines.localized" reads "Virtual Machines".
+-- Measured: matching on the raw basename left such a tab accounted for by no
+-- tab bar, and every regroup and reorder of its pane gave up because of it.
+-- A path that no longer resolves has no display name, so it falls back.
+local function tabName(p)
+  local ok, n = pcall(hs.fs.displayName, tostring(p))
+  if ok and type(n) == "string" and n ~= "" then return n end
+  return basename(p)
+end
+
 local function indexOfId(pane, id)
   for i, v in ipairs(pane.tabIds) do
     if v == id then return i end
@@ -307,7 +319,7 @@ end
 -- one the user can break at any time by dragging a tab along the bar.  The tab
 -- bar knows the answer, so ask it.
 --
--- Only when the answer is unambiguous, though: a tab bar shows basenames, so the
+-- Only when the answer is unambiguous, though: a tab bar shows folder names, so the
 -- mapping back to full paths is by folder name.  Two tabs whose folders share a
 -- name make it a guess, and a guess here would mis-order the paths that get
 -- persisted, so the existing order stays instead.  (The paths themselves are
@@ -321,7 +333,7 @@ local function reorderByTabBar(side)
   if #titles ~= #pane.tabIds then return end
 
   local indexOf = {}
-  for i, p in ipairs(pane.pathList) do indexOf[basename(p)] = i end
+  for i, p in ipairs(pane.pathList) do indexOf[tabName(p)] = i end
 
   local ids, paths, used = {}, {}, {}
   for _, t in ipairs(titles) do
@@ -416,7 +428,7 @@ local function needsRegroup()
         local bag = {}
         for _, t in ipairs(titles) do bag[t] = (bag[t] or 0) + 1 end
         for _, path in ipairs(pane.pathList) do
-          local b = basename(path)
+          local b = tabName(path)
           if not bag[b] or bag[b] == 0 then return true end
           bag[b] = bag[b] - 1
         end
@@ -478,7 +490,7 @@ local function groupManagedByWindow(managed)
       if not g.slot[i] then
         local found, several = nil, false
         for id, m in pairs(managed) do
-          if not taken[id] and basename(m.path) == t then
+          if not taken[id] and tabName(m.path) == t then
             if found then several = true; break end
             found = id
           end
@@ -604,9 +616,17 @@ local function regroupPanes()
 
   -- Provenance follows the tab: an id we minted is still one of ours whichever
   -- side it ended up on, so the two lists are pooled and dealt out again.
-  local wasMinted = {}
+  -- An id we minted that is not in the model at all is not part of this deal:
+  -- it is a tab a reconcile let go of a moment ago on a snapshot's word, and the
+  -- next reconcile takes it back if Finder lists it again.  Dropping its
+  -- provenance here, in the same pass as that drop, would make the loss final.
+  local wasMinted, stranded = {}, {}
   for _, side in ipairs(SIDES) do
-    for _, id in ipairs(panes[side].minted) do wasMinted[id] = true end
+    stranded[side] = {}
+    for _, id in ipairs(panes[side].minted) do
+      wasMinted[id] = true
+      if not managed[id] then stranded[side][#stranded[side] + 1] = id end
+    end
   end
   local kept = {}
 
@@ -626,6 +646,7 @@ local function regroupPanes()
         kept[id] = true
         if wasMinted[id] then minted[#minted + 1] = id end
       end
+      for _, id in ipairs(stranded[side]) do minted[#minted + 1] = id end
       pane.minted = minted
       log.i(string.format("regroup: %s is window %d now, %d tab(s), active %s",
                           side, g.active, #pane.tabIds, tostring(pane.activePath)))
@@ -687,6 +708,32 @@ function M.reconcile()
   -- Both views agree there is a Finder to look at, so its pid is readable and
   -- worth checking before a single id is believed.
   forgetIdsIfFinderChanged()
+
+  -- Take back the tabs of ours a previous reconcile wrongly let go.  The drop
+  -- below believes a snapshot that leaves an id out, and right after a Finder
+  -- relaunch that snapshot lies about single tabs as well: measured, four of the
+  -- left pane's freshly restored tabs were dropped in one pass while their window
+  -- stood there holding them.  Nothing ever took them back, and once the user
+  -- selected one of them the pane's window was showing a tab the model did not
+  -- know -- so the side resolved to no window at all, and every later show()
+  -- left it where it was, unraised and behind the user's own Finder windows.
+  -- `minted` still lists such an id, because the drop below leaves provenance
+  -- alone (a tab that left the panel by a drag loses it in regroupPanes), and
+  -- Finder listing the id again is the proof it was never closed.  Only for a
+  -- side that is still live: an empty one is reclaimMinted's.
+  for _, side in ipairs(SIDES) do
+    local pane = panes[side]
+    if #pane.tabIds > 0 then
+      for _, id in ipairs(pane.minted) do
+        if pathOf[id] and not M.sideOfTab(id) then
+          pane.tabIds[#pane.tabIds + 1]     = id
+          pane.pathList[#pane.pathList + 1] = pathOf[id]
+          log.i(string.format("reconcile: %s tab %d (%s) is back",
+                              side, id, tostring(pathOf[id])))
+        end
+      end
+    end
+  end
 
   for _, side in ipairs(SIDES) do
     local pane = panes[side]
@@ -1178,7 +1225,7 @@ local function restoreNextTab(side, done, attempt)
 end
 
 --- Select the tab whose folder is `want`.
--- Goes through the tab bar by basename rather than through our own index: the
+-- Goes through the tab bar by folder name rather than through our own index: the
 -- tab bar is the only thing that knows the real order, and AX has no object for
 -- an inactive tab, so AXPress is the only way to switch.  Two tabs with the same
 -- folder name in one pane pick the first -- the degradation noted in README.
@@ -1189,7 +1236,7 @@ local function selectActiveTab(side, want)
   local titles, selected = finder.tabTitles(w)
   if #titles == 0 then return end
   for i, t in ipairs(titles) do
-    if t == basename(want) then
+    if t == tabName(want) then
       if i ~= selected and finder.selectTab(w, i) then
         log.d(string.format("selected the %s pane's remembered tab (%s)", side, want))
       end
@@ -1784,7 +1831,7 @@ function M.onWindowCreated(win)
        and geometry.framesEqual(frame, pane.frame, cfg.frameTolerance) then
       local sharesTabBar = false
       for _, p in ipairs(pane.pathList) do
-        if titleSet[basename(p)] then
+        if titleSet[tabName(p)] then
           sharesTabBar = true
           break
         end
@@ -1974,7 +2021,7 @@ end
 --- Read the active tab out of the tab bar.
 -- Not tracked from events: switching tabs emits only windowMoved, never
 -- windowFocused, so there is nothing to track.  Read lazily, right before a
--- write, and matched by basename because the tab bar only knows basenames.
+-- write, and matched by folder name because that is all the tab bar knows.
 local function refreshActivePath(side)
   local pane = panes[side]
   local w = paneWindow(side)
@@ -1987,7 +2034,7 @@ local function refreshActivePath(side)
   end
   local want = titles[selected]
   for _, p in ipairs(pane.pathList) do
-    if basename(p) == want then
+    if tabName(p) == want then
       pane.activePath = p
       return
     end

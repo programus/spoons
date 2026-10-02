@@ -2878,5 +2878,84 @@ do
      fl.frame.x == flx and fl.frame.y == fly, fl.frame.x .. "," .. fl.frame.y)
 end
 
+-- Reported from the screen: with a floating Finder window up, the hotkey
+-- brought only the right pane forward.  The left pane's window was showing a
+-- tab the model had let go of -- a reconcile right after a Finder relaunch had
+-- believed a snapshot that left four freshly restored tabs out -- so the side
+-- resolved to no window, and raise() had nothing to raise.
+section("a tab of ours a reconcile let go is taken back when Finder lists it again")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  local b = w2.addTab(lw, HOME .. "/Pictures")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  w2.addTab(lw, "/private/tmp")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  ck("the left pane owns three tabs", #paneOf(p2, "left").tabIds == 3,
+     #paneOf(p2, "left").tabIds)
+  w2.advance(10)                          -- past the grace a fresh tab gets
+
+  w2.snapshotOmits = { [b] = true }       -- the post-relaunch lie, about one tab
+  p2.reconcile()
+  ck("the reconcile drops it", p2.sideOfTab(b) == nil, tostring(p2.sideOfTab(b)))
+  w2.snapshotOmits = nil
+
+  local bi
+  for i, t in ipairs(lw.tabs) do if t.id == b then bi = i end end
+  w2.finder.selectTab(w2.mkwin(lw, lw.active), bi)   -- the user clicks it
+  p2.reconcile()
+  ck("the tab is back in the left pane", p2.sideOfTab(b) == "left",
+     tostring(p2.sideOfTab(b)))
+  ck("in tab-bar order", paneOf(p2, "left").tabIds[2] == b,
+     table.concat(paneOf(p2, "left").tabIds, ","))
+  ck("at the path Finder reports", paneOf(p2, "left").pathList[2] == HOME .. "/Pictures",
+     paneOf(p2, "left").pathList[2])
+  local pw = p2.paneWindow("left")
+  ck("and the side resolves to its window again", pw ~= nil and pw:id() == b,
+     pw and pw:id())
+
+  -- The symptom itself: a floating window the user is working in, then the
+  -- hotkey.  Both panes have to come up over it.
+  local rw = w2.windowOfId(paneOf(p2, "right").tabIds[1])
+  local fl = w2.newWindow({ HOME .. "/Desktop" }, { x = 815, y = 175, w = 811, h = 399 })
+  w2.mkwin(fl, 1):focus()
+  p2.toggle(); w2.drain()
+  ck("the left pane is over the floating window", w2.zIndex(lw) < w2.zIndex(fl),
+     w2.zIndex(lw) .. " vs " .. w2.zIndex(fl))
+  ck("and so is the right one", w2.zIndex(rw) < w2.zIndex(fl),
+     w2.zIndex(rw) .. " vs " .. w2.zIndex(fl))
+
+  -- Provenance is the whole licence: a tab we never made is not taken in.
+  local foreign = fl.tabs[1].id
+  p2.reconcile()
+  ck("the floating window's tab stays floating", p2.sideOfTab(foreign) == nil)
+end
+
+section("a .localized folder is matched by the name the tab bar shows")
+do
+  -- Measured: "Virtual Machines.localized" is titled "Virtual Machines", and
+  -- matching on the basename left that tab accounted for by no tab bar.
+  local loc = "/tmp/dropfinder-spec/Virtual Machines.localized"
+  os.execute("mkdir -p '" .. loc .. "'")
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  local id = w2.addTab(lw, loc)
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  ck("the tab is adopted", p2.sideOfTab(id) == "left")
+  local tmp = w2.addTab(lw, "/private/tmp")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  w2.reorderTabs(lw, { 2, 3, 1 })          -- the user drags it to the front
+  p2.reconcile()
+  local ids = paneOf(p2, "left").tabIds
+  ck("the reorder is followed", ids[1] == id and ids[2] == tmp,
+     table.concat(ids, ","))
+  p2.persistNow()
+  ck("and the active tab is read back by its shown name",
+     paneOf(p2, "left").activePath == "/private/tmp", paneOf(p2, "left").activePath)
+  os.execute("rm -rf /tmp/dropfinder-spec")
+end
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 os.exit(fail == 0 and 0 or 1)

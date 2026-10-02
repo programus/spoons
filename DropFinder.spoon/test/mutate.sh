@@ -283,6 +283,12 @@ run_mut "the window with the most of a side's tabs is not preferred" panel.lua \
 run_mut "the side that lost its window keeps its ids" panel.lua \
   's/      pane\.tabIds, pane\.activeId, pane\.frame, pane\.parked = \{\}, nil, nil, nil\n      pane\.minted = \{\}\n      log\.i\(string\.format\("regroup/      log.i(string.format("regroup/s'
 run_mut "provenance does not follow the tab to its new side" panel.lua \
-  's/    for _, id in ipairs\(panes\[side\]\.minted\) do wasMinted\[id\] = true end/    for _, id in ipairs({}) do wasMinted[id] = true end/'
+  's/      wasMinted\[id\] = true\n//'
+run_mut "regroup drops the provenance of a tab a reconcile let go" panel.lua \
+  's/      for _, id in ipairs\(stranded\[side\]\) do minted\[#minted \+ 1\] = id end\n//'
+run_mut "a tab of ours a reconcile let go is never taken back" panel.lua \
+  's/        if pathOf\[id\] and not M\.sideOfTab\(id\) then/        if false then/'
+run_mut "tabs are matched by basename, not by the name the tab bar shows" panel.lua \
+  's/  local ok, n = pcall\(hs\.fs\.displayName, tostring\(p\)\)/  local ok, n = false, nil/'
 run_mut "a regrouped side that is on screen is recorded as put away" panel.lua \
   's/      pane\.parked = \(not geometry\.isOnScreen\(pane\.frame\)\) and pane\.frame or nil/      pane.parked = pane.frame/'
