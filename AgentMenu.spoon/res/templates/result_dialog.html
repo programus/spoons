@@ -149,6 +149,11 @@ button:hover { opacity: 0.85; }
 .turn-md code { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
 .turn-md p > code { background: var(--pre-bg); padding: 1px 4px; border-radius: 3px; }
 .turn-md a { color: var(--accent); }
+.turn-md .table-wrap { overflow-x: auto; margin: 0.6em 0; }
+.turn-md table { border-collapse: collapse; font-size: 13px; }
+.turn-md th,.turn-md td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; vertical-align: top; }
+.turn-md th { background: var(--bg2); font-weight: 600; }
+.turn-md td > code,.turn-md th > code { background: var(--pre-bg); padding: 1px 4px; border-radius: 3px; }
 .copy-turn-btn {
   position: absolute;
   top: 6px;
@@ -287,12 +292,56 @@ function i(s){
   return s;
 }
 function fence(buf){return"<pre><code>"+e(buf.replace(/\n$/,""))+"</code></pre>";}
+// GFM table row → cell strings.  Outer pipes are optional, "\|" is a literal
+// pipe, and a pipe inside a `code span` does not split the cell (models write
+// things like `a|b` in tables without escaping it).
+function cells(l){
+  l=l.trim();
+  if(l.charAt(0)==="|")l=l.slice(1);
+  if(/[^\\]\|$/.test(l)||l==="|")l=l.slice(0,-1);
+  var r=[],c="",tick=false;
+  for(var k=0;k<l.length;k++){
+    var ch=l.charAt(k);
+    if(ch==="\\"&&l.charAt(k+1)==="|"){c+="|";k++;continue;}
+    if(ch==="`")tick=!tick;
+    if(ch==="|"&&!tick){r.push(c.trim());c="";continue;}
+    c+=ch;
+  }
+  r.push(c.trim());
+  return r;
+}
+var DELIM=/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+// A table starts at a line containing a pipe, followed by a delimiter row with
+// the same number of columns.  Returns the HTML and how many lines it used.
+function table(lines,j){
+  var head=lines[j],sep=lines[j+1];
+  if(sep===undefined||head.indexOf("|")<0||!DELIM.test(sep))return null;
+  var hc=cells(head),al=cells(sep).map(function(s){
+    var L=s.charAt(0)===":",R=s.charAt(s.length-1)===":";
+    return L&&R?"center":R?"right":L?"left":"";
+  });
+  if(hc.length!==al.length)return null;
+  function row(cs,tag){
+    var h="<tr>";
+    for(var k=0;k<hc.length;k++){
+      h+="<"+tag+(al[k]?' style="text-align:'+al[k]+'"':"")+">"+i(cs[k]||"")+"</"+tag+">";
+    }
+    return h+"</tr>";
+  }
+  var h='<div class="table-wrap"><table><thead>'+row(hc,"th")+"</thead><tbody>",n=2;
+  while(j+n<lines.length&&lines[j+n].trim()!==""&&lines[j+n].indexOf("|")>=0){
+    h+=row(cells(lines[j+n]),"td");n++;
+  }
+  return {html:h+"</tbody></table></div>",used:n};
+}
 function p(src){
   var lines=src.split("\n"),out="",j=0,inCode=false,buf="";
   while(j<lines.length){
     var l=lines[j];
     if(!inCode&&/^```/.test(l)){inCode=true;buf="";j++;continue;}
     if(inCode){if(/^```/.test(l)){out+=fence(buf);inCode=false;buf="";}else{buf+=l+"\n";}j++;continue;}
+    var t=table(lines,j);
+    if(t){out+=t.html;j+=t.used;continue;}
     var h=l.match(/^(#{1,6})\s+(.*)/);
     if(h){out+="<h"+h[1].length+">"+i(h[2])+"</h"+h[1].length+">";j++;continue;}
     if(/^[-*+]\s/.test(l)){out+="<ul>";while(j<lines.length&&/^[-*+]\s/.test(lines[j])){out+="<li>"+i(lines[j].slice(2))+"</li>";j++;}out+="</ul>";continue;}
