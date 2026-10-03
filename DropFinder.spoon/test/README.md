@@ -116,6 +116,17 @@ came back (macOS 26):
   cannot carry it elsewhere, and modelling every `setFrame` as a Space change
   quietly excused the `"activate"` fallback from ever admitting it was stuck.
 
+Measured later (macOS 26, second pass), and modelled since: selecting an
+*inactive* tab by id carries its window onto the Space its display is showing
+(`F.hopTabs`; `world.hopTabsFails` takes that away); with "Displays have
+separate Spaces" off (`world.sharedSpaces`) a window moved to another display
+keeps its Space; a hidden Finder (`world.finderHidden`) hands Accessibility
+nothing and refuses the hop; `world.noWindowsHere[bid]` is an app with no window
+on the Space being shown, which focus must not be handed to; and
+`world.onClosed` delivers each close back to the panel the way Hammerspoon
+delivers `windowDestroyed` in between two AppleScript calls.  `F.boundsById`
+answers with every tab's frame, or `t.bounds` where a test pins one.
+
 Their premise matters, and got this wrong once.  Requirement 10 is *same display,
 stale Space*: the panes keep the frames they had, and the display they are on is
 now showing someone else's Space.  Setting the scene by hiding the panel first

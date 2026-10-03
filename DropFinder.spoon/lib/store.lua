@@ -102,6 +102,8 @@ local function normalise(raw)
     -- forever, in the panel's own slot, with nothing entitled to touch it.
     -- Requirement 4 is about the user's floating windows; a window whose id is
     -- in this list is demonstrably not one of those.
+    if rp.awaitRestore == true then pane.awaitRestore = true end
+
     local minted = type(rp.minted) == "table" and rp.minted or {}
     for _, id in ipairs(minted) do
       local n = tonumber(id)

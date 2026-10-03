@@ -358,6 +358,128 @@ do
 end
 
 -- ══ 14. hideMode = "minimize" ══════════════════════════════════════════════
+-- Asked for by the user: put away means "behind", not moved.  Nothing moves, so
+-- the hotkey's tri-state does all the work -- the panel is never "hidden" again,
+-- only focused or not.
+section('hideMode = "lower"')
+do
+  local p2, w2 = boot({ hideMode = "lower" })
+  w2.frontmost = "com.apple.Safari"
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  local shown = { x = lw.frame.x, y = lw.frame.y }
+  ck("shown and focused", p2.state() == "shown_focused", p2.state())
+
+  p2.toggle(); w2.drain()
+  ck("focus went back to the previous app", w2.frontmost == "com.apple.Safari",
+     w2.frontmost)
+  ck("the panes did not move", lw.frame.x == shown.x and lw.frame.y == shown.y,
+     lw.frame.x .. "," .. lw.frame.y)
+  ck("and were not minimized", not lw.minimized)
+  ck("nothing is recorded as parked", paneOf(p2, "left").parked == nil)
+  ck("so the panel reads as shown, not focused", p2.state() == "shown_unfocused",
+     p2.state())
+
+  p2.toggle(); w2.drain()
+  ck("the next press brings it to the front", p2.state() == "shown_focused", p2.state())
+
+  -- The user moves on to another app; putting the panel away gives focus to
+  -- that one, not to the app it first came up over.
+  w2.activateOther("com.apple.Terminal")
+  ck("another app has focus now", p2.state() == "shown_unfocused", p2.state())
+  p2.toggle(); w2.drain()
+  ck("raised again", p2.state() == "shown_focused", p2.state())
+  p2.toggle(); w2.drain()
+  ck("and focus goes back to the app it was raised over",
+     w2.frontmost == "com.apple.Terminal", w2.frontmost)
+end
+
+-- Measured: put away on a Space where only the desktop was in front, the panel
+-- handed focus to the app remembered from another Space -- and macOS took the
+-- user there with it.
+section('hideMode = "lower" with nothing on this Space to go behind')
+do
+  local p2, w2 = boot({ hideMode = "lower" })
+  w2.frontmost = "com.apple.Safari"
+  p2.show(); w2.drain()
+  w2.noWindowsHere["com.apple.Safari"] = true    -- its windows are on another Space
+  local before = countLog(w2, "^launchOrFocus:com%.apple%.Safari$")
+  p2.toggle(); w2.drain()
+  ck("focus was not handed to an app with nothing here",
+     countLog(w2, "^launchOrFocus:com%.apple%.Safari$") == before)
+  ck("so the panel was parked instead", paneOf(p2, "left").parked ~= nil
+     and paneOf(p2, "right").parked ~= nil)
+  ck("and reads as hidden", p2.state() == "hidden", p2.state())
+end
+
+section("hiding never hands focus to an app on another Space")
+do
+  local p2, w2 = boot()
+  w2.frontmost = "com.apple.Safari"
+  p2.show(); w2.drain()
+  w2.noWindowsHere["com.apple.Safari"] = true
+  local before = countLog(w2, "^launchOrFocus:com%.apple%.Safari$")
+  p2.toggle(); w2.drain()
+  ck("the panel was parked", paneOf(p2, "left").parked ~= nil)
+  ck("and Safari was left where it is",
+     countLog(w2, "^launchOrFocus:com%.apple%.Safari$") == before)
+end
+
+section('hideMode = "hide"')
+do
+  local p2, w2 = boot({ hideMode = "hide" })
+  w2.frontmost = "com.apple.Safari"
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  local shown = { x = lw.frame.x, y = lw.frame.y }
+  local ids = paneOf(p2, "left").tabIds[1] .. "/" .. paneOf(p2, "right").tabIds[1]
+  p2.toggle(); w2.drain()
+  ck("Finder was hidden", w2.finderHidden == true)
+  ck("nothing moved", lw.frame.x == shown.x and lw.frame.y == shown.y)
+  ck("nothing was minimized or parked", not lw.minimized and paneOf(p2, "left").parked == nil)
+  ck("state is hidden", p2.state() == "hidden", p2.state())
+  p2.toggle(); w2.drain()
+  ck("Finder is back", w2.finderHidden == false)
+  ck("with the same panes", paneOf(p2, "left").tabIds[1] .. "/" .. paneOf(p2, "right").tabIds[1] == ids)
+  ck("up and focused", p2.state() == "shown_focused", p2.state())
+end
+
+-- Measured: the user pressed Cmd+H on the panel, then the hotkey.
+section("Cmd+H by hand, then the hotkey: the panel comes back whole")
+do
+  local p2, w2 = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  w2.addTab(lw, "/Applications")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  local ids = table.concat(paneOf(p2, "left").tabIds, ",")
+  w2.finderHidden = true
+  w2.frontmost = "com.other.app"
+  ck("a hidden Finder reads as hidden", p2.state() == "hidden", p2.state())
+  local opened = countLog(w2, "^openWindowAt")
+  p2.toggle(); w2.drain()
+  ck("Finder is unhidden", w2.finderHidden == false)
+  ck("the same tabs, none rebuilt", table.concat(paneOf(p2, "left").tabIds, ",") == ids
+     and countLog(w2, "^openWindowAt") == opened, table.concat(paneOf(p2, "left").tabIds, ","))
+  ck("up and focused", p2.state() == "shown_focused", p2.state())
+end
+
+section('hideMode = "lower" finishes a queued tab restore when it raises')
+do
+  local p2, w2 = boot({ hideMode = "lower" })
+  p2.show(); w2.drain()
+  paneOf(p2, "left").pending = { paths = { "/Applications", "/usr" }, activePath = "/usr" }
+  w2.activateOther("com.apple.Terminal")
+  ck("the panel reads as shown, not focused", p2.state() == "shown_unfocused", p2.state())
+  w2.alerts = {}
+  p2.toggle(); w2.drain()
+  ck("the queued tabs were made", #paneOf(p2, "left").tabIds == 3, #paneOf(p2, "left").tabIds)
+  ck("and nothing is left queued", paneOf(p2, "left").pending == nil)
+  ck("the user was told", (w2.alerts[1] or ""):match("2 tab%(s%) restored") ~= nil, w2.alerts[1])
+  ck("the panel is up and focused", p2.state() == "shown_focused", p2.state())
+end
+
+-- ── hideMode = "minimize" ──────────────────────────────────────────────────
 section('hideMode = "minimize"')
 do
   local p2, w2 = boot({ hideMode = "minimize" })
@@ -1105,6 +1227,42 @@ do
   ck("laid out at the bottom as usual", lf.y + lf.h == mf.y + mf.h, lf.y + lf.h)
 end
 
+-- The other system setting, and the one on the machine: displays share their
+-- Spaces, so the park corner's display is showing the same Space as the mouse
+-- screen, and a pane parked there one Space over is just as far away as one in
+-- the middle of the screen.  Moving it between displays carries nothing.
+section("with Spaces shared by every display, a parked pane is still fetched")
+do
+  local p2, w2 = boot({ crossSpaceFallback = "recreate" })
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  w2.addTab(lw, "/Applications")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  local lid = paneOf(p2, "left").tabIds[1]
+  local ids = table.concat(paneOf(p2, "left").tabIds, ",")
+  p2.hide(); w2.drain()
+  ck("the parked pane is on another display",
+     paneOf(p2, "left").parked.x >= hs.screen.allScreens()[1]:frame().w)
+
+  w2.sharedSpaces = true
+  for _, sc in ipairs(hs.screen.allScreens()) do w2.spaceOfScreen[sc] = 3 end
+  w2.spaceOfWindow[w2.windowOfId(lid)] = 7
+  w2.moveSpaceNoop = true
+  p2.reconcile()
+  p2.toggle(); w2.drain()
+  ck("the pane was brought over through its tabs", countLog(w2, "^hopTabs:") >= 1,
+     countLog(w2, "^hopTabs:"))
+  ck("and is on this Space", w2.spaceOfWindow[w2.windowOfId(lid)] == 3,
+     tostring(w2.spaceOfWindow[w2.windowOfId(lid)]))
+  ck("with every tab it had", table.concat(paneOf(p2, "left").tabIds, ",") == ids,
+     table.concat(paneOf(p2, "left").tabIds, ","))
+  local lf = frameOf(p2, "left")
+  local mf = hs.screen.mainScreen():frame()
+  ck("laid out at the bottom of the mouse screen", lf and lf.y + lf.h == mf.y + mf.h,
+     lf and (lf.y + lf.h))
+  ck("the panel is up and focused", p2.state() == "shown_focused", p2.state())
+end
+
 -- The tri-state's middle branch has the same problem as show(): "shown but not
 -- focused" is a geometric verdict, and a panel one Space over satisfies it.
 -- Raising without moving would leave the screen unchanged.
@@ -1183,7 +1341,7 @@ end
 -- ══ 34. the move is refused: "activate" keeps the windows ═══════════════════
 section("crossSpaceFallback = activate leaves the panes where they are")
 do
-  local p2, w2 = boot()
+  local p2, w2 = boot({ crossSpaceFallback = "activate" })
   p2.show(); w2.drain()
   local lid = paneOf(p2, "left").tabIds[1]
   w2.setWindowSpace(lid, 7)
@@ -1216,6 +1374,7 @@ do
   w2.setWindowSpace(lid, 7)        -- the left pane is elsewhere ...
   w2.setWindowSpace(rid, 3)        -- ... the right one is already here
   w2.moveSpaceNoop = true          -- claims success, window does not move
+  w2.hopTabsFails = true           -- and its tabs cannot carry it either
   p2.show(); w2.drain()
 
   local pane = paneOf(p2, "left")
@@ -1233,6 +1392,81 @@ do
   ck("the old window is gone", w2.windowOfId(lid) == nil)
   ck("the panel is up", p2.state() == "shown_focused", p2.state())
   ck("recreate really was the configured fallback", c2.crossSpaceFallback == "recreate")
+end
+
+-- Measured on macOS 26: selecting an inactive tab by id from another Space
+-- carries the whole window over.  The user saw it before anyone measured it --
+-- the old pane turned up on their Space a moment before recreate closed it --
+-- and it is the one move that keeps everything: tabs, scroll positions, frame.
+section("a pane with several tabs is carried over through its tabs")
+do
+  local p2, w2 = boot({ crossSpaceFallback = "recreate" })
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  w2.addTab(lw, "/Applications")
+  p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  w2.finder.selectTab(w2.mkwin(lw, 1), 1)      -- the first tab is the one showing
+  p2.reconcile()
+  local ids  = table.concat(paneOf(p2, "left").tabIds, ",")
+  local lid  = paneOf(p2, "left").tabIds[1]
+  local rid  = paneOf(p2, "right").tabIds[1]
+
+  w2.setWindowSpace(lid, 7)
+  w2.setWindowSpace(rid, 7)
+  w2.spaceOfScreen[hs.screen.allScreens()[1]] = 3
+  w2.moveSpaceNoop = true
+  p2.reconcile()
+  local opened = countLog(w2, "^openWindowAt")
+  p2.toggle(); w2.drain()
+
+  ck("the left pane is the same window, every tab kept",
+     table.concat(paneOf(p2, "left").tabIds, ",") == ids,
+     table.concat(paneOf(p2, "left").tabIds, ","))
+  ck("and it is on this Space", w2.spaceOfWindow[w2.windowOfId(lid)] == 3,
+     tostring(w2.spaceOfWindow[w2.windowOfId(lid)]))
+  ck("showing the tab it showed before", w2.windowOfId(lid).active == 1,
+     w2.windowOfId(lid).active)
+  ck("through its tabs, not through hs.spaces", countLog(w2, "^hopTabs:") == 1,
+     countLog(w2, "^hopTabs:"))
+  ck("the one-tab right pane, with no tab to go through, was rebuilt",
+     paneOf(p2, "right").tabIds[1] ~= rid and w2.windowOfId(rid) == nil)
+  ck("which is the only window made", countLog(w2, "^openWindowAt") == opened + 1,
+     countLog(w2, "^openWindowAt") - opened)
+  ck("the panel is up and focused", p2.state() == "shown_focused", p2.state())
+end
+
+-- Measured on the machine: the right pane held seven tabs, recreate closed them
+-- one at a time, and the windowDestroyed between two closes reconciled the
+-- closed ones out of the recipe -- the pane came back with two.
+section("recreate keeps every path while its own closes are reported")
+do
+  local p2, w2 = boot({ crossSpaceFallback = "recreate" })
+  p2.show(); w2.drain()
+  local rw = w2.windowOfId(paneOf(p2, "right").tabIds[1])
+  for _, path in ipairs({ "/Applications", "/usr", "/bin" }) do
+    w2.addTab(rw, path)
+    p2.onWindowCreated(w2.mkwin(rw, rw.active)); w2.drain()
+  end
+  local want = table.concat(paneOf(p2, "right").pathList, ",")
+  local lid, rid = paneOf(p2, "left").tabIds[1], paneOf(p2, "right").tabIds[1]
+
+  w2.setWindowSpace(lid, 7)
+  w2.setWindowSpace(rid, 7)
+  w2.spaceOfScreen[hs.screen.allScreens()[1]] = 3
+  w2.moveSpaceNoop = true
+  w2.hopTabsFails = true
+  w2.onClosed = function() p2.onWindowDestroyed() end
+  p2.reconcile()
+  p2.toggle(); w2.drain()
+  w2.onClosed = nil
+
+  ck("the right pane is a new window", paneOf(p2, "right").tabIds[1] ~= rid)
+  ck("with all four of its paths, in order",
+     table.concat(paneOf(p2, "right").pathList, ",") == want,
+     table.concat(paneOf(p2, "right").pathList, ",") .. " want " .. want)
+  ck("as tabs of one window", #w2.windowOfId(paneOf(p2, "right").tabIds[1]).tabs == 4)
+  ck("each pane was closed in one call", countLog(w2, "^closeTabs:") == 2,
+     countLog(w2, "^closeTabs:"))
 end
 
 -- ══ 35b. another Space, where Finder hands over no window at all ═══════════
@@ -1303,11 +1537,11 @@ do
   ck("the panel is up and focused", p2.state() == "shown_focused", p2.state())
 end
 
--- With the default fallback the panel cannot follow the user on this system, so
--- the one thing that must not happen is a hotkey that quietly does nothing.
-section("the default fallback says so when the panel cannot follow")
+-- With "activate" the panel cannot follow the user on this system, so the one
+-- thing that must not happen is a hotkey that quietly does nothing.
+section("the activate fallback says so when the panel cannot follow")
 do
-  local p2, w2 = boot()
+  local p2, w2 = boot({ crossSpaceFallback = "activate" })
   p2.show(); w2.drain()
   local lid = paneOf(p2, "left").tabIds[1]
   w2.setWindowSpace(lid, 7)
@@ -2366,6 +2600,183 @@ do
   ck("and the floater was left where it was made",
      w2.windowOfId(fid).frame.x == 100 and w2.windowOfId(fid).frame.y == 100,
      w2.windowOfId(fid).frame.x .. "," .. w2.windowOfId(fid).frame.y)
+end
+
+-- ══ 11b. the windows macOS restores after Finder relaunches ═══════════════
+-- Reported from the machine: Finder restarted, macOS put both panes back under
+-- new ids, and the next press made two more -- four windows stacked in the
+-- panel's slot.  The restored pair holds exactly the pane's folders at exactly
+-- the pane's frame, and that is the evidence taken back.
+
+local R_LIB = R    -- the sections below call the right side's recipe R
+
+--- Show a panel whose left pane holds three tabs; return what macOS would
+--- restore for each side.
+local function panelWithTabs()
+  local p2, w2, cfg2, geo, st = boot()
+  p2.show(); w2.drain()
+  local lw = w2.windowOfId(paneOf(p2, "left").tabIds[1])
+  for _, path in ipairs({ "/Applications", "/usr" }) do
+    w2.addTab(lw, path)
+    p2.onWindowCreated(w2.mkwin(lw, lw.active)); w2.drain()
+  end
+  local function recipe(side)
+    local pane = paneOf(p2, side)
+    local paths = {}
+    for _, path in ipairs(pane.pathList) do paths[#paths + 1] = path end
+    local f = w2.windowOfId(pane.tabIds[1]).frame
+    return { paths = paths, frame = { x = f.x, y = f.y, w = f.w, h = f.h } }
+  end
+  return p2, w2, recipe("left"), recipe("right"), cfg2, geo, st
+end
+
+local function restore(w2, r)
+  return w2.newWindow(r.paths, { x = r.frame.x, y = r.frame.y, w = r.frame.w, h = r.frame.h })
+end
+
+local function idsOf(rw)
+  local ids = {}
+  for _, t in ipairs(rw.tabs) do ids[#ids + 1] = t.id end
+  table.sort(ids)
+  return table.concat(ids, ",")
+end
+local function sortedIds(pane)
+  local ids = {}
+  for _, id in ipairs(pane.tabIds) do ids[#ids + 1] = id end
+  table.sort(ids)
+  return table.concat(ids, ",")
+end
+
+section("the panes macOS restores after a relaunch are taken back, not duplicated")
+do
+  local p2, w2, L, R = panelWithTabs()
+  ck("the left pane has three tabs", #L.paths == 3, #L.paths)
+
+  w2.windows = {}                              -- killall Finder
+  p2.onFinderTerminated(); w2.drain()
+  w2.finderPid = w2.finderPid + 1
+  local lrw, rrw = restore(w2, L), restore(w2, R)
+  -- Measured: the restored active tab came back cascaded off its siblings.
+  lrw.tabs[1].bounds = { x = L.frame.x + 1, y = L.frame.y + 9, w = L.frame.w, h = L.frame.h }
+  local floater = w2.newWindow({ "/Applications" })
+  p2.onFinderLaunched(); w2.drain()
+
+  local before = #w2.windows
+  local opened = countLog(w2, "^openWindowAt")
+  w2.alerts = {}
+  p2.show(); w2.drain()
+  ck("no window was made", #w2.windows == before, #w2.windows .. "/" .. before)
+  ck("the left side is the restored left window",
+     sortedIds(paneOf(p2, "left")) == idsOf(lrw), sortedIds(paneOf(p2, "left")))
+  ck("the right side is the restored right window",
+     sortedIds(paneOf(p2, "right")) == idsOf(rrw), sortedIds(paneOf(p2, "right")))
+  ck("with every folder, in order",
+     table.concat(paneOf(p2, "left").pathList, ",") == table.concat(L.paths, ","),
+     table.concat(paneOf(p2, "left").pathList, ","))
+  ck("nothing is queued for a rebuild", paneOf(p2, "left").pending == nil)
+  ck("no restore was announced", #w2.alerts == 0, w2.alerts[1])
+  ck("the floater was left where it was made",
+     floater.frame.x == 100 and floater.frame.y == 100)
+  ck("the panel is up and focused", p2.state() == "shown_focused", p2.state())
+  ck("Finder was never asked for a window", countLog(w2, "^openWindowAt") == opened,
+     countLog(w2, "^openWindowAt") .. "/" .. opened)
+
+  -- The look is a one-off: a later rebuild of a closed side is a rebuild.
+  w2.closeWindow(w2.windowOfId(paneOf(p2, "right").tabIds[1]))
+  p2.reconcile()
+  local mine = restore(w2, R)
+  before = #w2.windows
+  p2.show(); w2.drain()
+  ck("a later rebuild makes its own window", #w2.windows == before + 1, #w2.windows)
+  ck("and leaves the user's identical one alone",
+     not p2.sideOfTab(mine.tabs[1].id))
+end
+
+-- What happened on the machine: Finder relaunched with Hammerspoon running but
+-- the restart was only noticed at the next load, and the press came an hour and
+-- a reload later.
+section("a restored pane is taken back across a reload as well")
+do
+  local p2, w2, L, R, cfg2, geo, st = panelWithTabs()
+  p2.persistNow()
+
+  w2.windows = {}
+  w2.finderPid = w2.finderPid + 1
+  local lrw, rrw = restore(w2, L), restore(w2, R)
+
+  local function load()
+    local px = dofile(R_LIB .. "panel.lua")
+    px.setDeps({ finder = w2.finder, geometry = geo, store = st, log = hs.logger.new() })
+    px.setConfig(cfg2)
+    px.loadState()
+    px.reconcile()
+    return px
+  end
+  local p3 = load()                     -- notices the new pid, forgets the ids
+  p3.persistNow()
+  local p4 = load()                     -- and the reload after that
+  local before = #w2.windows
+  p4.show(); w2.drain()
+  ck("no window was made", #w2.windows == before, #w2.windows .. "/" .. before)
+  ck("both sides are the restored windows",
+     sortedIds(p4.panes().left) == idsOf(lrw) and sortedIds(p4.panes().right) == idsOf(rrw),
+     sortedIds(p4.panes().left) .. " / " .. sortedIds(p4.panes().right))
+end
+
+section("a one-tab window somewhere else is not taken for a restored pane")
+do
+  local p2, w2, L, R = panelWithTabs()
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+  w2.finderPid = w2.finderPid + 1
+  local floater = w2.newWindow(R.paths)    -- right's folder, Finder's own default spot
+  p2.onFinderLaunched(); w2.drain()
+  p2.show(); w2.drain()
+  ck("the right side got a window of its own",
+     paneOf(p2, "right").tabIds[1] ~= floater.tabs[1].id)
+  ck("and the floater stayed put", floater.frame.x == 100 and floater.frame.y == 100)
+end
+
+section("two restored windows with the pane's folders are a guess, so neither is taken")
+do
+  local p2, w2, L = panelWithTabs()
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+  w2.finderPid = w2.finderPid + 1
+  local a = restore(w2, L)
+  local b = w2.newWindow(L.paths)          -- the same folders, somewhere else
+  p2.onFinderLaunched(); w2.drain()
+  p2.show(); w2.drain()
+  ck("the left side is neither of them",
+     not p2.sideOfTab(a.tabs[1].id) and not p2.sideOfTab(b.tabs[1].id))
+end
+
+section("a finished tab restore is announced once")
+do
+  local p2, w2, L = panelWithTabs()
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+  p2.onFinderLaunched(); w2.drain()
+  w2.alerts = {}
+  p2.show(); w2.drain()
+  ck("the left pane is back with every tab", #paneOf(p2, "left").tabIds == 3,
+     #paneOf(p2, "left").tabIds)
+  ck("one alert", #w2.alerts == 1, #w2.alerts)
+  ck("saying how many tabs came back",
+     (w2.alerts[1] or ""):match("2 tab%(s%) restored") ~= nil, w2.alerts[1])
+
+  w2.alerts = {}
+  p2.hide(); w2.drain()
+  p2.show(); w2.drain()
+  ck("an ordinary show says nothing", #w2.alerts == 0, w2.alerts[1])
+
+  -- The next rebuild counts its own tabs, not the last one's as well.
+  w2.windows = {}
+  p2.onFinderTerminated(); w2.drain()
+  p2.onFinderLaunched(); w2.drain()
+  p2.show(); w2.drain()
+  ck("the next rebuild counts from zero",
+     (w2.alerts[1] or ""):match("^%[DropFinder%] 2 tab%(s%) restored$") ~= nil, w2.alerts[1])
 end
 
 -- ══ 12. a tab the user dragged between windows ══════════════════════════════

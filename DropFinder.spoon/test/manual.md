@@ -32,11 +32,11 @@ passes were thrown away to that before the check became routine.
 | 9 | `hs.reload()`, hotkey | Both sides reattach by id — no new windows, no flicker |
 | 10 | `killall Finder`, hotkey | Both sides rebuilt from the persisted paths, all tabs, and no extra windows beyond the ones macOS itself restores |
 | 10b | `killall Finder` again while a rebuild is still running, then hotkey | The queued tabs are still on disk and come back on the next press |
-| 10c | Quit Hammerspoon, `killall Finder`, start Hammerspoon again, hotkey | Both sides rebuilt from the paths; the two windows from before are left floating, never moved — the log says Finder is a different process now |
+| 10c | Quit Hammerspoon, `killall Finder`, start Hammerspoon again, hotkey | The windows macOS restored are taken back as the panes; only a side with no matching restored window is rebuilt.  (This used to leave four windows stacked in the panel's slot — reported from the machine; see below) |
 | 10d | With the panel up, hide it, then make Finder stop listing one side (another Space on its display, or a fresh relaunch), then hotkey twice | The side is taken back rather than opened again — no third window in that slot; the log says `reclaimed N ... window(s)` |
 | 11 | Open a Finder window by double-clicking a folder | It stays floating: never moved, resized or closed, and it stays put when the panel hides |
 | 12 | Cmd+M a pane by hand, then the hotkey; then the same walk under `hideMode = "minimize"` | Both verified — see below |
-| 13 | Press the hotkey from another Space | **Verified**, after fixing what it exposed. See below |
+| 13 | Press the hotkey from another Space | **Verified**, after fixing what it exposed — twice.  See below |
 | 14 | Second display, then unplug it while shown | **Verified by hand.** Both panes survive and are re-laid out on a remaining display. Plugging it back in leaves them where they are — see below |
 | 15 | Focus a floating window, adopt hotkey | Its tabs merge in order into the side nearer the mouse and the source window closes.  Live three-tab merge ended with model and Finder in exact agreement (`49085, 49087, 49089, 49090, 49092, 49103, 49104, 49105`) and no `is gone` line in the log |
 | 16 | `spoon.DropFinder:stop()` | Both sides come back on screen, nothing left in the Dock, hotkeys dead |
@@ -141,6 +141,55 @@ their layout intact.
 
 So requirement 10 is met, but only through `"recreate"`.  Anyone using several
 Spaces should set it; the README says so under limitations.
+
+### Second pass, 2026-10-03: the window does move
+
+Walked again on the three-display Mac, now with "Displays have separate Spaces"
+**off** (every display shows the same Space; `spacesForScreen` = `{6, 7}` for
+all three).  The hotkey from the other Space looked dead: `"activate"` was the
+default, and the log said `could not move the left pane to Space 7` on every
+press.  `"recreate"` became the default, and walking it found three more
+things:
+
+| Question | Answer |
+|---|---|
+| Minimize, then restore by id, from the other Space | stays on its Space |
+| Minimize on its Space, switch away, restore | stays on its Space |
+| `set bounds` onto another display and back (shared Spaces) | stays on its Space |
+| `set index of window id <inactive tab> to 1` from the other Space | **the whole window arrives**, every tab, at its frame, visible to Accessibility |
+| the same for the tab that is already active | nothing |
+| any of those on a *minimized* window | it is restored on its own Space and **the user is switched there** |
+| `launchOrFocusByBundleID` of an app whose windows are all on another Space | **the user is switched there** |
+| touching a Finder that is hidden (Cmd+H) | the tab hop fails; Accessibility has no window for a rebuild to restore tabs into |
+
+The fourth row was found by the user, not by me: watching `"recreate"` work,
+the old pane appeared on their Space for a moment before its tabs were closed --
+closing one tab selects another, and that carried the window over.  So a pane
+with two or more tabs is now fetched by selecting another tab and then the one
+that was showing (`finder.hopTabs`), and nothing is closed.  Re-walked: hidden
+on Space 7, hotkey on Space 6, both panes arrived (`L=9 R=7`, `windowSpaces` =
+6 for both), the user stayed on 6; back on 7, same again.
+
+And the defect `"recreate"` showed on its first live run: it closed a pane's
+tabs one AppleScript call at a time, the `windowDestroyed` of each close was
+delivered between two calls, and the reconcile it triggered dropped the closed
+tab's path -- a seven-tab right pane came back with two.  The ids are now let go
+of before anything is closed, and the closes are one call.
+
+The minimized row is why `hideMode = "minimize"` does not mix with Spaces.  The
+user settled on `"hide"` (Finder hidden as a whole, as Cmd+H does); walked:
+hide, hotkey, panel back with every tab; Cmd+H by hand, hotkey, the same.
+
+### Closing a whole pane by hand, 2026-10-04
+
+Walked by the user with `hideMode = "hide"`: the right pane's close button,
+then the hotkey twice.  The log has all seven of its tabs gone in **one**
+reconcile (`right pane closed; it will be rebuilt on the next show()`), so a
+window's close button is not the tab-by-tab case above.  The left pane filled
+the panel at once; the first press put the panel away, the second rebuilt the
+right pane and restored its six other tabs over the next fifteen seconds, in
+their old order.  (`hs.window:close()` on the same kind of window closes only
+its active tab -- it is not what the close button does.)
 
 ## Step 14, a display going away and coming back
 

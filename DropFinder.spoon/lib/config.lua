@@ -58,7 +58,7 @@ local DEFAULTS = {
   restoreFocusOnHide = true,
   restoreTabs        = true,
   crossSpace         = true,
-  crossSpaceFallback = "activate",
+  crossSpaceFallback = "recreate",
   snapBack           = false,
   adoptTarget        = "mouse",
   persist            = true,
@@ -135,7 +135,7 @@ function M.loadConfig(raw)
   end
 
   cfg.hideMode = oneOf("hideMode",
-    pick(raw, DEFAULTS, "hideMode", "string"), { "park", "minimize" })
+    pick(raw, DEFAULTS, "hideMode", "string"), { "park", "minimize", "lower", "hide" })
   cfg.parkCorner = oneOf("parkCorner",
     pick(raw, DEFAULTS, "parkCorner", "string"), { "bottom-right", "bottom-left" })
   cfg.screenPolicy = oneOf("screenPolicy",

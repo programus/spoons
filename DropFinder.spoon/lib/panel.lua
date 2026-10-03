@@ -53,6 +53,10 @@ local draining = { left = false, right = false }   -- a tab restore is in flight
 local restoresOff = false     -- set by restoreAll(): stop() means stop, including
                               -- a drain that a show() already in flight is about
                               -- to start.  Cleared by the next show().
+---@type integer
+local restoring = 0           -- sides whose tab restore is still in flight
+---@type integer
+local restoredTabs = 0        -- tabs those restores have made so far
 ---@type function
 local writeState              -- defined in the persistence section below; the tab
                               -- restore writes each tab down as it lands, and that
@@ -91,6 +95,9 @@ local function newPane(side)
                        -- window being gone; an id dropped and forgotten is a
                        -- window left in the panel's slot that nothing may touch.
                        -- Persisted, and cleared when Finder dies with the ids.
+    awaitRestore = nil, -- true from the moment Finder died with this pane alive
+                       -- until the next rebuild has looked for the window macOS
+                       -- puts back on relaunch; see adoptRestored().  Persisted.
   }
 end
 
@@ -212,6 +219,12 @@ end
 ---@param pane table
 ---@param side string
 local function forgetPaneIds(pane, side)
+  -- A pane that was alive when its Finder died is about to be put back by macOS
+  -- itself, which reopens every window at its old frame with its old tabs.  The
+  -- next rebuild has to look for that window before making another one; without
+  -- this a relaunch left the panel twice over on screen, the restored pair under
+  -- the new one.
+  if #pane.tabIds > 0 then pane.awaitRestore = true end
   pane.tabIds    = {}
   pane.activeId  = nil
   pane.frame     = nil
@@ -835,6 +848,9 @@ end
 -- requirement 9 says the survivor legitimately fills the panel on its own.
 --@return string
 function M.state()
+  -- A hidden Finder shows nothing, whatever the geometry says: Cmd+H by hand,
+  -- or hideMode = "hide".
+  if finder.isHidden() then return "hidden" end
   local known, visible = 0, 0
   for _, side in ipairs(SIDES) do
     local w = isLive(side) and paneWindow(side) or nil
@@ -1058,6 +1074,116 @@ local function reclaimMinted(side)
   return true
 end
 
+-- How far a restored window may sit from where it was and still count as the
+-- same place.  Measured: macOS put a restored pane's active tab back at +1,+9 of
+-- the frame its other tabs still report -- Finder cascading it off a window it
+-- believed was already there.
+local RESTORE_TOL = 16
+
+local function nearFrame(a, b)
+  return math.abs(a.x - b.x) <= RESTORE_TOL and math.abs(a.y - b.y) <= RESTORE_TOL
+     and math.abs(a.w - b.w) <= RESTORE_TOL and math.abs(a.h - b.h) <= RESTORE_TOL
+end
+
+--- Could `rect` be where this side's pane stood, on any display?
+-- The frame itself is not persisted, so the layout is asked instead.  Both
+-- panel shapes count: the side alone fills the panel, with its sibling it takes
+-- its half.
+local function isPaneFrameOf(side, rect)
+  local h = minHeight[minHeightKey()]
+  for _, s in ipairs(hs.screen.allScreens()) do
+    for _, live in ipairs({ { left = true, right = true }, { [side] = true } }) do
+      local f = geometry.paneFrames(s, cfg, h, live)[side]
+      if f and nearFrame(f, rect) then return true end
+    end
+  end
+  return false
+end
+
+--- Take back the window macOS restored for `side` after Finder relaunched.
+-- Finder reopens its windows on relaunch with the same tabs at the same frames,
+-- but under new ids, so neither the persisted ids nor the minted list can name
+-- them.  What does is the recipe: a pane that died holding these exact folders is
+-- a window that has come back holding these exact folders, all of its tabs
+-- reporting one frame.  The test is deliberately all or nothing -- every folder,
+-- no extra one, one window -- so a window the user opened can only be taken if
+-- it is indistinguishable from the pane, and a single-tab recipe, which is far
+-- too easy to match by accident, also has to stand where the pane stood.
+-- Only looked for once per relaunch: after that, a window with the right
+-- folders is the user's own, and requirement 4 applies to it.
+---@return boolean  true when the side is live again
+local function adoptRestored(side)
+  local pane = panes[side]
+  if not pane.awaitRestore then return false end
+  pane.awaitRestore = nil
+
+  local want = {}
+  for _, p in ipairs(pane.pathList) do want[#want + 1] = p end
+  if pane.pending then
+    for _, p in ipairs(pane.pending.paths) do want[#want + 1] = p end
+  end
+  if #want == 0 then return false end
+
+  local snap = finder.snapshot()
+  local bounds = snap and finder.boundsById() or nil
+  if not (snap and bounds) then return false end
+
+  -- Group the tabs nobody owns by the frame they report: one group per window.
+  local groups = {}
+  for _, t in ipairs(snap) do
+    local b = bounds[t.id]
+    if b and t.path ~= "" and not M.sideOfTab(t.id) then
+      local home = nil
+      for _, g in ipairs(groups) do
+        if nearFrame(g.frame, b) then home = g; break end
+      end
+      if not home then
+        home = { frame = b, ids = {}, paths = {} }
+        groups[#groups + 1] = home
+      end
+      home.ids[#home.ids + 1]     = t.id
+      home.paths[#home.paths + 1] = t.path
+    end
+  end
+
+  local function sameBag(paths)
+    if #paths ~= #want then return false end
+    local bag = {}
+    for _, p in ipairs(want) do bag[p] = (bag[p] or 0) + 1 end
+    for _, p in ipairs(paths) do
+      if not bag[p] or bag[p] == 0 then return false end
+      bag[p] = bag[p] - 1
+    end
+    return true
+  end
+
+  local found, several = nil, false
+  for _, g in ipairs(groups) do
+    if sameBag(g.paths) and (#want > 1 or isPaneFrameOf(side, g.frame)) then
+      if found then several = true end
+      found = found or g
+    end
+  end
+  if not found then return false end
+  if several then
+    log.i(string.format("more than one restored window holds the %s pane's folders; " ..
+                        "making a new pane instead", side))
+    return false
+  end
+
+  pane.tabIds, pane.pathList = found.ids, found.paths
+  pane.activeId   = found.ids[1]
+  pane.activePath = (pane.pending and pane.pending.activePath) or pane.activePath
+  pane.pending    = nil
+  pane.origin     = "reattach"
+  pane.collapsed  = false
+  for _, id in ipairs(found.ids) do mint(side, id) end
+  reorderByTabBar(side)
+  log.i(string.format("took back the %s pane macOS restored after Finder relaunched " ..
+                      "(%d tab(s), %s)", side, #found.ids, table.concat(found.ids, ", ")))
+  return true
+end
+
 --- Create whichever sides are missing, then call `cb()`.
 -- Phase 1 restores one tab per side; the remaining tabs are Phase 2.
 local function ensurePanes(cb, retried)
@@ -1065,6 +1191,9 @@ local function ensurePanes(cb, retried)
   local failed, strays = 0, {}
   for _, side in ipairs(SIDES) do
     if not isLive(side) then reclaimMinted(side) end
+    -- Counts as made: the AX tree has never been asked about these ids, so the
+    -- reconcile after the settle is what gives layout and raise a window.
+    if not isLive(side) and adoptRestored(side) then created = true end
     if not isLive(side) then
       local plan, activeIdx = rebuildPlan(side)
       local path = plan[1]
@@ -1114,7 +1243,7 @@ local function ensurePanes(cb, retried)
     hs.application.launchOrFocusByBundleID(FINDER_BUNDLE)
     return hs.timer.doAfter(0.5, function()
       -- Now that windows can be addressed, take back the ones we could not use.
-      for _, id in ipairs(strays) do finder.closeTab(id) end
+      finder.closeTabs(strays)
       M.reconcile()
       ensurePanes(cb, true)
     end)
@@ -1202,6 +1331,7 @@ local function restoreNextTab(side, done, attempt)
       -- carries on from here instead of making a second copy of everything it had
       -- already made.
       writeState(false)
+      restoredTabs = restoredTabs + 1
       log.i(string.format("restored tab %d (%s) in the %s pane", id, path, side))
     else
       -- The path was taken off the queue to be used; a failure has to put it
@@ -1253,6 +1383,23 @@ end
 -- rebuild -- Finder restarted, or that side was closed.
 local function completeRebuilds()
   if restoresOff then return end
+  -- A rebuild of a dozen tabs takes the better part of a minute, and the panel
+  -- is usable -- and flickering -- the whole time, so nothing on screen says when
+  -- it is over.  One alert when the last side is done does.
+  local function finished()
+    restoring = math.max(0, restoring - 1)
+    if restoring > 0 then return end
+    local made = restoredTabs
+    restoredTabs = 0
+    if restoresOff then return end      -- stop() ended it; nobody is waiting
+    local queued = 0
+    for _, s in ipairs(SIDES) do
+      if panes[s].pending then queued = queued + #panes[s].pending.paths end
+    end
+    local msg = string.format("[DropFinder] %d tab(s) restored", made)
+    if queued > 0 then msg = msg .. string.format(", %d still to come", queued) end
+    hs.alert.show(msg)
+  end
   for _, side in ipairs(SIDES) do
     local pending = panes[side].pending
     -- The guard matters because every show() calls this, and a queue left over
@@ -1261,11 +1408,13 @@ local function completeRebuilds()
     if pending and not draining[side] then
       local s, want = side, pending.activePath
       draining[s] = true
+      restoring = restoring + 1
       restoreNextTab(s, function()
         draining[s] = false
         M.reconcile()
         selectActiveTab(s, want)
         M.persistNow()    -- reconciles first; writes whatever queue is left
+        finished()
       end)
     end
   end
@@ -1280,12 +1429,15 @@ end
 -- Measured on macOS 26, with a Space added for the purpose: moveWindowToSpace
 -- returns true and moves nothing.  windowSpaces keeps answering with the Space
 -- the pane was already on, whether it is asked with a window object or a window
--- id, so the claim is caught rather than believed -- and there is no other way
--- to carry another app's window between Spaces.  What decides what the user
--- actually sees is therefore the fallback: "activate" leaves the panel where it
--- is and says so once, while "recreate" closes the panes by id and rebuilds them
--- here, which does work -- a window made from another Space lands on the Space
--- you are standing on and Accessibility can see it straight away.
+-- id, so the claim is caught rather than believed.  Neither minimizing and
+-- restoring nor a trip to another display and back moves a window either (both
+-- measured).  What does is Finder itself: selecting an inactive tab by id from
+-- another Space carries its whole window over (finder.hopTabs), tabs, scroll
+-- positions and all, so that is tried first.  A one-tab pane has no inactive tab,
+-- and what happens to it -- or to a pane the hop did not move -- is the
+-- fallback: "recreate" closes it by id and rebuilds it here, since a window made
+-- from another Space lands on the Space you are standing on, while "activate"
+-- leaves it where it is and says so once.
 
 --- Which Space is showing on `screen` right now?
 -- activeSpaceOnScreen, not focusedSpace(): with separate Spaces per display the
@@ -1314,10 +1466,18 @@ local function recreateOnCurrentSpace(sides, cb)
   for _, side in ipairs(sides) do
     local pane = panes[side]
     log.i("recreating the " .. side .. " pane on the current Space")
-    for _, id in ipairs(pane.tabIds) do finder.closeTab(id) end
-    -- pathList and activePath survive on purpose: they are the recipe that
+    -- Let go of the ids *before* closing anything.  Tabs used to be closed one
+    -- AppleScript call at a time, Hammerspoon delivered the windowDestroyed of
+    -- one close in between two calls, and that reconcile dropped a closed tab's
+    -- path along with its id -- so the pane was rebuilt from whatever had not
+    -- been closed yet.  Measured: a seven-tab right pane came back with two.
+    -- The closes are one call now, but the events still arrive afterwards, so
+    -- the ids go first: with none left there is nothing for a reconcile to
+    -- drop, and pathList and activePath stay whole -- they are the recipe
     -- ensurePanes and completeRebuilds rebuild from.
+    local ids = pane.tabIds
     pane.tabIds, pane.activeId, pane.frame, pane.parked = {}, nil, nil, nil
+    finder.closeTabs(ids)
   end
   ensurePanes(cb)
 end
@@ -1336,7 +1496,7 @@ local function moveToCurrentSpace(screen, cb)
     return cb()
   end
 
-  local moved, stuck = false, {}
+  local moved, stuck, hopped = false, {}, {}
   for _, side in ipairs(SIDES) do
     local pane = panes[side]
     local w = isLive(side) and paneWindow(side) or nil
@@ -1359,43 +1519,88 @@ local function moveToCurrentSpace(screen, cb)
     -- is stuck on another Space", and with crossSpaceFallback = "recreate" tore
     -- both panes down and rebuilt them on *every* show, because the park corner
     -- normally is on another display.
+    -- That holds only while each display has Spaces of its own -- and then it
+    -- holds even for a pane its display is not showing: measured with separate
+    -- Spaces, `set bounds` by id lands a window from a hidden Space on the
+    -- target display's Space.  With "Displays have separate Spaces" off, every
+    -- display shows the same Space, so a pane on the wrong one is on the wrong
+    -- one wherever it is, and moving it between displays changes nothing --
+    -- measured, a window set onto another display by id kept its Space.  The two
+    -- settings tell themselves apart: only with shared Spaces is another display
+    -- showing the very Space the panel is wanted on.  So the pane is fetched
+    -- when it is on this display, or on a display showing this Space.
     -- Without a window object the remembered frame is the only thing left that
     -- says which display the pane is on -- and it is a fair witness, because a
     -- pane on another Space has not moved.
     local ws = w and w:screen() or geometry.screenOf(pane.frame)
-    local sameScreen = ws and screen and ws:id() == screen:id()
+    local sameScreen = ws and screen and
+      (ws:id() == screen:id() or currentSpaceOf(ws) == target)
     -- Only a definite "no" is acted on: an unanswerable windowSpaces must not
     -- turn into a move, let alone into a recreate.
     if handle and sameScreen and isOnSpace(handle, target) == false then
-      -- One move per pane: its tabs share one real window, so moving the active
-      -- tab takes the whole pane along.
-      local ok = pcall(hs.spaces.moveWindowToSpace, handle, target)
-      if ok and isOnSpace(handle, target) ~= false then
-        moved = true
-        log.i(string.format("moved the %s pane to Space %s", side, tostring(target)))
+      -- First choice: select another tab and then the active one again (see
+      -- finder.hopTabs).  Measured on macOS 26, that carries the whole window
+      -- here with every tab, its scroll positions and its frame -- the one way
+      -- found to move it at all.  A one-tab pane has no other tab to go through.
+      local activeId = w and w:id() or handle
+      local via = nil
+      for _, id in ipairs(pane.tabIds) do
+        if id ~= activeId then via = id; break end
+      end
+      if via and finder.hopTabs(via, activeId) then
+        hopped[#hopped + 1] = { side = side, id = activeId }
       else
-        stuck[#stuck + 1] = side
-        log.w(string.format("could not move the %s pane to Space %s", side, tostring(target)))
+        -- One move per pane: its tabs share one real window, so moving the
+        -- active tab takes the whole pane along.
+        local ok = pcall(hs.spaces.moveWindowToSpace, handle, target)
+        if ok and isOnSpace(handle, target) ~= false then
+          moved = true
+          log.i(string.format("moved the %s pane to Space %s", side, tostring(target)))
+        else
+          stuck[#stuck + 1] = side
+          log.w(string.format("could not move the %s pane to Space %s", side, tostring(target)))
+        end
       end
     end
   end
 
-  if #stuck > 0 then
-    if cfg.crossSpaceFallback == "recreate" then
-      return recreateOnCurrentSpace(stuck, cb)
+  local function finish()
+    if #stuck > 0 then
+      if cfg.crossSpaceFallback == "recreate" then
+        return recreateOnCurrentSpace(stuck, cb)
+      end
+      if not spacesWarned then
+        spacesWarned = true
+        hs.alert.show("[DropFinder] the panel is on another Space and could not be moved")
+      end
     end
-    if not spacesWarned then
-      spacesWarned = true
-      hs.alert.show("[DropFinder] the panel is on another Space and could not be moved")
+    if moved then
+      return hs.timer.doAfter(cfg.settleDelay, function()
+        M.reconcile()
+        cb()
+      end)
     end
+    cb()
   end
-  if moved then
-    return hs.timer.doAfter(cfg.settleDelay, function()
-      M.reconcile()
-      cb()
-    end)
-  end
-  cb()
+
+  if #hopped == 0 then return finish() end
+  -- Checked rather than assumed, like the hs.spaces move: give the window a
+  -- moment to arrive, then ask where it is.  A hop that did not take is handed
+  -- to the fallback like any other stuck pane.
+  hs.timer.doAfter(cfg.settleDelay, function()
+    for _, h in ipairs(hopped) do
+      if isOnSpace(h.id, target) == false then
+        stuck[#stuck + 1] = h.side
+        log.w(string.format("could not bring the %s pane to Space %s through its tabs",
+                            h.side, tostring(target)))
+      else
+        log.i(string.format("brought the %s pane to Space %s through its tabs",
+                            h.side, tostring(target)))
+      end
+    end
+    M.reconcile()
+    finish()
+  end)
 end
 
 -- ── Un-hiding ──────────────────────────────────────────────────────────────
@@ -1406,6 +1611,15 @@ end
 --- screen the mouse is on now.
 local function unhide(cb)
   local wait = 0
+
+  -- First, because nothing else here works on a hidden Finder.  Measured after
+  -- the user pressed Cmd+H: the hop to this Space failed for one pane, it was
+  -- rebuilt instead, and the rebuild could not restore a single tab because
+  -- Accessibility had no window to put them in.
+  if finder.isHidden() then
+    finder.setHidden(false)
+    wait = 0.3
+  end
 
   -- Deliberately not gated on `hideMode == "minimize"`: a pane can also be
   -- minimized because the user pressed Cmd+M on it, and then the hotkey has to
@@ -1553,13 +1767,64 @@ function M.show(done)
   end)
 end
 
+--- Can focus go to `bid` without macOS switching Spaces to get there?
+-- Activating an app whose windows are all on another Space takes the user to
+-- that Space -- measured: putting the panel away on a Space with only the
+-- desktop in front handed focus to the app remembered from before, and the
+-- screen went with it.  Accessibility only hands over the windows on the Space
+-- being shown, so "has an unminimized window" is the question; when it cannot
+-- be asked, the answer is yes, which is how hiding behaved before.
+local function hasWindowHere(bid)
+  local app = hs.application.applicationsForBundleID(bid)[1]
+  if not app then return false end
+  local ok, wins = pcall(function() return app:allWindows() end)
+  if not ok or type(wins) ~= "table" then return true end
+  for _, w in ipairs(wins) do
+    local okm, min = pcall(function() return w:isMinimized() end)
+    if not (okm and min) then return true end
+  end
+  return false
+end
+
+--- Hand focus back to what had it before the panel came up.
+--@return boolean  true when something here took it
+local function focusBack()
+  -- A floating Finder window the panel came up over gets focus back directly.
+  -- Handing it to prevAppBundleID instead would activate that app *over* the
+  -- window the user was working in, which is the opposite of what requirement
+  -- 12 is for.  Focus is the one thing requirement 4 does allow: the window is
+  -- not moved, resized, minimized or closed.
+  local w = nil
+  if prevWindowId and not M.sideOfTab(prevWindowId) then
+    w = finder.axWindowById(prevWindowId)
+  end
+  if w then
+    pcall(function() w:focus() end)
+    return true
+  end
+  if prevAppBundleID and hasWindowHere(prevAppBundleID) then
+    -- launchOrFocusByBundleID, not app:hide(): hiding Finder would also hide the
+    -- user's floating windows.
+    hs.application.launchOrFocusByBundleID(prevAppBundleID)
+    return true
+  end
+  if prevAppBundleID then
+    log.d(prevAppBundleID .. " has no window on this Space; leaving focus alone")
+  end
+  return false
+end
+
 --- Park (or minimize) the panel and hand focus back.
+-- hideMode = "lower" does only the second half: the panes stay where they are
+-- and the app that had focus comes back over them.  macOS has no way to send
+-- another app's window to the back, so that is as far down as a pane can go --
+-- under that app's windows, still over everything else.
 function M.hide()
   M.persistNow()          -- reconciles first, so the parking below sees a fresh model
   M.suppress(0.6)
 
   for _, side in ipairs(SIDES) do
-    if isLive(side) then
+    if isLive(side) and cfg.hideMode ~= "lower" and cfg.hideMode ~= "hide" then
       if cfg.hideMode == "minimize" then
         local pane = panes[side]
         local ok, err = finder.setCollapsed(pane.activeId or pane.tabIds[1], true)
@@ -1571,22 +1836,22 @@ function M.hide()
     end
   end
 
-  if cfg.restoreFocusOnHide then
-    -- A floating Finder window the panel came up over gets focus back directly.
-    -- Handing it to prevAppBundleID instead would activate that app *over* the
-    -- window the user was working in, which is the opposite of what requirement
-    -- 12 is for.  Focus is the one thing requirement 4 does allow: the window is
-    -- not moved, resized, minimized or closed.
-    local w = nil
-    if prevWindowId and not M.sideOfTab(prevWindowId) then
-      w = finder.axWindowById(prevWindowId)
-    end
-    if w then
-      pcall(function() w:focus() end)
-    elseif prevAppBundleID then
-      -- launchOrFocusByBundleID, not app:hide(): hiding Finder would also hide the
-      -- user's floating windows.
-      hs.application.launchOrFocusByBundleID(prevAppBundleID)
+  -- "hide" puts every Finder window away at once -- the user's own included,
+  -- which is the deal that mode makes -- and macOS hands focus to the next app
+  -- by itself, so there is nothing else to do.
+  if cfg.hideMode == "hide" then
+    finder.setHidden(true)
+    return
+  end
+
+  -- Under "lower" handing focus back *is* the hide, so it happens either way --
+  -- and when there is nothing on this Space to hand it to, there is nothing to
+  -- go behind either, so the panel is parked instead of staying in front.
+  if cfg.restoreFocusOnHide or cfg.hideMode == "lower" then
+    if not focusBack() and cfg.hideMode == "lower" then
+      for _, side in ipairs(SIDES) do
+        if isLive(side) then parkSide(side) end
+      end
     end
   end
 end
@@ -1603,6 +1868,12 @@ function M.toggle()
   local s = M.state()
   log.d("toggle from state: " .. s)
   if s == "hidden" then
+    M.show()
+  elseif s == "shown_unfocused" and cfg.hideMode == "lower" then
+    -- Under "lower" the panel is never "hidden", so this is the only way it is
+    -- ever brought out -- and it has to do everything show() does: rebuild a
+    -- side that was closed, lay out, and finish a tab restore that is queued.
+    -- Measured: with raise() alone, a queue of eight tabs sat there untouched.
     M.show()
   elseif s == "shown_unfocused" then
     -- Not just raise(): "shown" is a geometric verdict, and a pane sitting on
@@ -2070,6 +2341,9 @@ function writeState(refreshActive)
       -- Written for the same reason as pending, one step further out: this is
       -- what lets a *later* run take back a window an earlier one stranded.
       minted     = pane.minted,
+      -- Survives a reload between Finder relaunching and the next show(), which
+      -- is when the restored window is looked for.
+      awaitRestore = pane.awaitRestore or nil,
     }
   end
   st.finderPid = mintedPid
@@ -2114,6 +2388,7 @@ function M.loadState()
     -- is here, and rebuildPlan() counts it in if the pane has to be made again.
     pane.pending    = sp.pending
     pane.minted     = sp.minted or {}
+    pane.awaitRestore = sp.awaitRestore or nil
     pane.origin     = #sp.tabIds > 0 and "reattach" or nil
   end
   -- Trusted only against the Finder that issued them; reclaimMinted() checks.
@@ -2169,6 +2444,7 @@ function M.resetState()
   store.clear()
   panes = { left = newPane("left"), right = newPane("right") }
   draining, restoresOff = { left = false, right = false }, false
+  restoring, restoredTabs = 0, 0
   minHeight, lastSide, prevAppBundleID, prevWindowId = {}, "left", nil, nil
 end
 

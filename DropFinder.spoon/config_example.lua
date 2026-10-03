@@ -55,7 +55,21 @@ return {
   --                per-tab history all survive.
   --   "minimize" — minimize both panes instead.  No sliver, but two thumbnails
   --                appear in the Dock and Cmd+Tab to Finder will not bring them
-  --                back — only the hotkey does.
+  --                back — only the hotkey does.  Does not mix with Spaces:
+  --                macOS restores a minimized window on the Space it was
+  --                minimized on and takes you there, so pressing the hotkey on
+  --                another Space sends you back to the panel instead of
+  --                bringing the panel to you (measured, macOS 26).
+  --   "lower"    — move nothing: only give focus back to the app that had it,
+  --                whose windows then cover the panel.  macOS cannot send
+  --                another app's window to the back, so the panel stays
+  --                visible over the desktop and every other app's windows.
+  --                The hotkey toggles on focus alone: in front it lowers,
+  --                anywhere else it raises.
+  --   "hide"     — hide Finder as a whole, as Cmd+H does.  Nothing moves and
+  --                nothing is left on screen, but every Finder window you
+  --                have open is hidden with the panel and comes back with it.
+  --                The desktop stays.
   hideMode = "park",
 
   -- Optional. Default "bottom-right". Which corner "park" parks in.
@@ -110,14 +124,20 @@ return {
   -- DropFinder falls back below and says so once.
   crossSpace = true,
 
-  -- Optional. Default "activate". What to do when a pane is on another Space and
-  -- cannot be moved.
-  --   "activate" — leave it there and show it anyway; macOS switches you to its
-  --                Space when it takes focus.  Nothing is lost.
+  -- Optional. Default "recreate". What to do when a pane is on another Space and
+  -- cannot be moved.  hs.spaces claims the move and makes none on macOS 26, so a
+  -- pane with two or more tabs is brought over through Finder instead -- by
+  -- selecting another of its tabs, which carries the window along -- and keeps
+  -- everything.  This setting is for a one-tab pane, and for a pane that trick
+  -- did not move.
   --   "recreate" — close that side and rebuild it from its remembered paths in
-  --                the current Space.  Always works, costs ~300ms per tab, and
-  --                loses scroll position and selection.
-  crossSpaceFallback = "activate",
+  --                the current Space.  Always works.  The active tab is up in
+  --                about a second, the other tabs follow at a few seconds each
+  --                and an alert says when they are all back.  Scroll position
+  --                and selection are lost.
+  --   "activate" — leave it there and say so once.  Nothing is lost, but the
+  --                panel does not come to you.
+  crossSpaceFallback = "recreate",
 
   -- ────────────────────────────────────────────────────────────────────────
   -- 5. Adopt

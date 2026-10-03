@@ -148,9 +148,15 @@ function W.new(screens, opts)
       -- window in the experiment came over because it crossed from one display
       -- to another.  Modelling every setFrame as a Space change would quietly
       -- excuse the "activate" fallback from ever having to admit it is stuck.
+      -- With "Displays have separate Spaces" off (world.sharedSpaces) there is
+      -- nothing to join: every display shows the same Space, and a window moved
+      -- to another display keeps the one it had -- measured, by setting a pane
+      -- on another Space onto another display by id and back.
       local from, to = bestScreen(prev), world.screenOfRW(rw)
       local active = world.spaceOfScreen[to]
-      if active and from ~= to then world.spaceOfWindow[rw] = active end
+      if active and from ~= to and not world.sharedSpaces then
+        world.spaceOfWindow[rw] = active
+      end
       -- macOS emits windowMoved for our own moves too, which is exactly why the
       -- panel has a suppression window; deliver it so that gate gets tested.
       if world.onMoved then world.onMoved(mkwin(rw, rw.active)) end
@@ -215,7 +221,20 @@ function W.new(screens, opts)
     hs.mouse.getCurrentScreen = function() return hs.screen.allScreens()[i] end
   end
 
+  -- Only what panel.lua asks of another app: does it have a window on the
+  -- Space being shown?  world.noWindowsHere[bid] = true says no.
+  world.noWindowsHere = {}
+  hs.application.applicationsForBundleID = function(bid)
+    local app = {}
+    function app:allWindows()
+      if world.noWindowsHere[bid] then return {} end
+      return { { isMinimized = function() return false end } }
+    end
+    return { app }
+  end
+
   hs.application.launchOrFocusByBundleID = function(bid)
+    if bid == FINDER then world.finderHidden = false end
     world.frontmost = bid
     world.focusedId = nil
     -- Activating an app brings its window forward, over anything that was in
@@ -324,6 +343,10 @@ function W.new(screens, opts)
           table.remove(rw.tabs, ti)
           if #rw.tabs == 0 then table.remove(world.windows, wi)
           elseif rw.active > #rw.tabs then rw.active = #rw.tabs end
+          -- Measured: Hammerspoon delivers windowDestroyed for one close while
+          -- the AppleScript for the next is still running, so a caller closing
+          -- several tabs in a row sees the model react in between.
+          if world.onClosed then world.onClosed(id) end
           return true
         end
       end
@@ -423,6 +446,15 @@ function W.new(screens, opts)
     return { pid = function() return world.finderPid end }
   end
   function F.ensureRunning(cb) cb(F.app()) end
+  -- Cmd+H.  Accessibility gives nothing for a hidden app's windows and Finder
+  -- will not select a tab of one (measured: the hop to another Space failed).
+  world.finderHidden = false
+  function F.isHidden() return world.finderHidden end
+  function F.setHidden(h)
+    world.finderHidden = h
+    if h and world.frontmost == FINDER then world.frontmost = "com.other.app" end
+    return true
+  end
   function F.automationAvailable() return true, nil end
   function F.totalFinderInjected(cb) return cb(false) end
 
@@ -446,6 +478,19 @@ function W.new(screens, opts)
       end
     end
     return out, nil
+  end
+
+  -- Every tab answers with its window's frame, unless a test pins it with
+  -- t.bounds: measured, a restored window's active tab can come back cascaded a
+  -- few points off the frame its other tabs still report.
+  function F.boundsById()
+    if not world.finderRunning then return nil, "Finder is not running" end
+    if world.finderAsleep then return {}, nil end
+    local m = {}
+    for _, rw in ipairs(world.windows) do
+      for _, t in ipairs(rw.tabs) do m[t.id] = copy(t.bounds or rw.frame) end
+    end
+    return m, nil
   end
 
   function F.pathsById()
@@ -490,6 +535,7 @@ function W.new(screens, opts)
       return {}
     end
     local out = {}
+    if world.finderHidden then return out end
     for _, rw in ipairs(world.windows) do
       if not world.axCanSee(rw) then
         -- another Space: invisible to AX, still in the AppleScript snapshot
@@ -623,7 +669,40 @@ function W.new(screens, opts)
     return w:frame()
   end
 
+  -- Measured on macOS 26: selecting an inactive tab by id carries its whole
+  -- window onto the Space its display is showing; selecting the active tab
+  -- does nothing.  world.hopTabsFails models a system where it does not work.
+  function F.hopTabs(via, active)
+    world.log[#world.log + 1] = "hopTabs:" .. via .. ">" .. active
+    local rw, vi = world.windowOfId(via)
+    local rw2, ai = world.windowOfId(active)
+    if not rw or rw ~= rw2 then return false, "not tabs of one window" end
+    if world.finderHidden then return false, "Finder is hidden" end
+    -- Two selections in a row, and either one can be the one that moves it:
+    -- the model's idea of the active tab can be stale.
+    for _, i in ipairs({ vi, ai }) do
+      if not world.hopTabsFails and i ~= rw.active then
+        local here = world.spaceOfScreen[world.screenOfRW(rw)]
+        if here then world.spaceOfWindow[rw] = here end
+      end
+      rw.active = i
+    end
+    return true, nil
+  end
+
   function F.closeTab(id) return world.closeTabById(id), nil end
+  -- One AppleScript call: every close lands before any of their events does.
+  function F.closeTabs(ids)
+    world.log[#world.log + 1] = "closeTabs:" .. #ids
+    local hook, n, closed = world.onClosed, 0, {}
+    world.onClosed = nil
+    for _, id in ipairs(ids) do
+      if world.closeTabById(id) then n = n + 1; closed[#closed + 1] = id end
+    end
+    world.onClosed = hook
+    if hook then for _, id in ipairs(closed) do hook(id) end end
+    return n, nil
+  end
   function F.setToolbarVisible() return true, nil end
 
   -- ── hs.spaces (a private API, modelled only as far as panel.lua goes) ────
@@ -642,6 +721,7 @@ function W.new(screens, opts)
   world.moveSpaceFails  = false   -- moveWindowToSpace throws
   world.moveSpaceNoop   = false   -- ... or claims success and does nothing
   world.axSeesOtherSpaces = false -- see world.axCanSee
+  world.sharedSpaces    = false   -- displays do not have separate Spaces
 
   --- A window object, or the id of one of its tabs.
   local function rwOf(w)

@@ -164,7 +164,7 @@ run_mut "the hotkey gives up on a Finder that has just restarted" panel.lua \
 run_mut "the retry does not wake Finder first" panel.lua \
   's/    hs\.application\.launchOrFocusByBundleID\(FINDER_BUNDLE\)//'
 run_mut "the untargeted windows are left behind" panel.lua \
-  's/      for _, id in ipairs\(strays\) do finder\.closeTab\(id\) end//'
+  's/      finder\.closeTabs\(strays\)\n//'
 run_mut "the retry can retry forever" panel.lua \
   's/      ensurePanes\(cb, true\)/      ensurePanes(cb)/'
 
@@ -184,9 +184,9 @@ run_mut "the sibling is raised but the focus is left with it" panel.lua \
 run_mut "hide() forgets which floating window the panel came up over" panel.lua \
   's/    if id and not M\.sideOfTab\(id\) then prevWindowId = id end//'
 run_mut "hide() activates the previous app on top of it anyway" panel.lua \
-  's/    elseif prevAppBundleID then/    end\n    if prevAppBundleID then/'
+  's/    pcall\(function\(\) w:focus\(\) end\)\n    return true\n  end/    pcall(function() w:focus() end)\n  end/'
 run_mut "the remembered window is focused without checking it is still there" panel.lua \
-  's/    if prevWindowId and not M\.sideOfTab\(prevWindowId\) then\n      w = finder\.axWindowById\(prevWindowId\)\n    end/    w = prevWindowId and { focus = function() end } or nil/s'
+  's/  if prevWindowId and not M\.sideOfTab\(prevWindowId\) then\n    w = finder\.axWindowById\(prevWindowId\)\n  end/  w = prevWindowId and { focus = function() end } or nil/s'
 
 # ── Phase 3h: a tab neither view has published yet (from the screen) ──────────
 run_mut "a tab neither view has published yet counts as closed" panel.lua \
@@ -292,3 +292,48 @@ run_mut "tabs are matched by basename, not by the name the tab bar shows" panel.
   's/  local ok, n = pcall\(hs\.fs\.displayName, tostring\(p\)\)/  local ok, n = false, nil/'
 run_mut "a regrouped side that is on screen is recorded as put away" panel.lua \
   's/      pane\.parked = \(not geometry\.isOnScreen\(pane\.frame\)\) and pane\.frame or nil/      pane.parked = pane.frame/'
+run_mut "a pane that died with Finder is never looked for among the restored windows" panel.lua \
+  's/  if #pane\.tabIds > 0 then pane\.awaitRestore = true end\n//'
+run_mut "the look for a restored pane does not survive a reload" panel.lua \
+  's/      awaitRestore = pane\.awaitRestore or nil,\n//'
+run_mut "a restored pane is looked for on every rebuild" panel.lua \
+  's/  pane\.awaitRestore = nil\n\n  local want/\n  local want/'
+run_mut "a restored window only has to share some of the pane's folders" panel.lua \
+  's/    if #paths ~= #want then return false end\n//'
+run_mut "a one-tab restored window is not checked against the pane's place" panel.lua \
+  's/if sameBag\(g\.paths\) and \(#want > 1 or isPaneFrameOf\(side, g\.frame\)\) then/if sameBag(g.paths) then/'
+run_mut "two candidate restored windows are guessed at" panel.lua \
+  's/  if several then\n    log\.i\(string\.format\("more than one restored/  if false then\n    log.i(string.format("more than one restored/s'
+run_mut "a restored tab cascaded off its siblings is split from its window" panel.lua \
+  's/local RESTORE_TOL = 16/local RESTORE_TOL = 0/'
+run_mut "a finished tab restore is not announced" panel.lua \
+  's/    hs\.alert\.show\(msg\)\n//'
+run_mut "the restore count is never reset" panel.lua \
+  's/    restoredTabs = 0\n    if restoresOff/    if restoresOff/'
+# Either defence alone holds: one batched call makes the whole pane vanish at
+# once, which reconcile keeps the recipe for, and letting go of the ids first
+# leaves it nothing to drop.  So the mutant takes both away.
+run_mut "recreate closes tab by tab before letting go of their ids" panel.lua \
+  's/    local ids = pane\.tabIds\n    pane\.tabIds, pane\.activeId, pane\.frame, pane\.parked = \{\}, nil, nil, nil\n    finder\.closeTabs\(ids\)/    for _, id in ipairs(pane.tabIds) do finder.closeTab(id) end\n    pane.tabIds, pane.activeId, pane.frame, pane.parked = {}, nil, nil, nil/'
+run_mut "a pane with several tabs is never carried over through them" panel.lua \
+  's/      if via and finder\.hopTabs\(via, activeId\) then/      if false then/'
+run_mut "a hop that did not take is believed" panel.lua \
+  's/      if isOnSpace\(h\.id, target\) == false then/      if false then/'
+run_mut "a pane on another display is assumed to change Space with the display" panel.lua \
+  's/\(ws:id\(\) == screen:id\(\) or currentSpaceOf\(ws\) == target\)/(ws:id() == screen:id())/'
+run_mut "lower parks the panel anyway" panel.lua \
+  's/    if isLive\(side\) and cfg\.hideMode ~= "lower" and /    if isLive(side) and /'
+run_mut "show() forgets who had focus" panel.lua \
+  's/  restoresOff = false     -- asking for the panel asks for its tabs too\n  capturePrevApp\(\)/  restoresOff = false/'
+run_mut "focus goes back to an app on another Space" panel.lua \
+  's/  if prevAppBundleID and hasWindowHere\(prevAppBundleID\) then/  if prevAppBundleID then/'
+run_mut "lower with nothing to go behind stays in front" panel.lua \
+  's/    if not focusBack\(\) and cfg\.hideMode == "lower" then/    if not focusBack() and false then/'
+run_mut "a hidden Finder is not unhidden before the panel is shown" panel.lua \
+  's/    finder\.setHidden\(false\)\n    wait = 0\.3/    wait = 0.3/'
+run_mut "a hidden Finder reads as shown" panel.lua \
+  's/  if finder\.isHidden\(\) then return "hidden" end\n//'
+run_mut "lower only raises, never shows" panel.lua \
+  's/  elseif s == "shown_unfocused" and cfg\.hideMode == "lower" then/  elseif false then/'
+run_mut "hide mode parks instead of hiding Finder" panel.lua \
+  's/  if cfg\.hideMode == "hide" then\n    finder\.setHidden\(true\)\n    return\n  end/  if false then end/'

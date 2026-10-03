@@ -169,6 +169,30 @@ function M.snapshot()
   return list, nil
 end
 
+--- id -> {x, y, w, h} for every Finder tab.
+-- Plural forms only, for the reason in the header.  A tab that is not its
+-- window's active one answers with the bounds the window had when it last was
+-- active, which is what makes this useful right after a relaunch: every tab of a
+-- window macOS has just restored still names the frame the window was restored
+-- at.  Finder's `bounds` is {left, top, right, bottom}, global and y-down.
+--@return table|nil, string|nil
+function M.boundsById()
+  local out, err = runAS(
+    'tell application "Finder" to return {id of every window, bounds of every window}')
+  if err then return nil, err end
+  if type(out) ~= "table" or type(out[1]) ~= "table" or type(out[2]) ~= "table" then
+    return nil, "unexpected answer to bounds of every window"
+  end
+  local map = {}
+  for i, id in ipairs(out[1]) do
+    local b = out[2][i]
+    if type(id) == "number" and type(b) == "table" and #b >= 4 then
+      map[math.floor(id)] = { x = b[1], y = b[2], w = b[3] - b[1], h = b[4] - b[2] }
+    end
+  end
+  return map, nil
+end
+
 --- id -> path, for the callers that only need the lookup.
 --@return table|nil, string|nil
 function M.pathsById()
@@ -562,6 +586,79 @@ function M.closeTab(id)
     'tell application "Finder" to close window id %d', id))
   if err then return false, err end
   return true, nil
+end
+
+--- Is Finder hidden (Cmd+H, or hideMode = "hide")?
+--@return boolean
+function M.isHidden()
+  local app = M.app()
+  if not app then return false end
+  local ok, h = pcall(function() return app:isHidden() end)
+  return ok and h == true
+end
+
+--- Hide or unhide Finder as a whole -- every one of its windows, the user's
+--- own included.  The desktop is not a window and stays.
+--@param hidden boolean
+--@return boolean
+function M.setHidden(hidden)
+  local app = M.app()
+  if not app then return false end
+  local ok = pcall(function()
+    if hidden then app:hide() else app:unhide() end
+  end)
+  return ok
+end
+
+--- Bring a whole window to the Space the user is on, by way of its tabs.
+-- Measured on macOS 26: selecting an *inactive* tab by id (`set index ... to 1`)
+-- from another Space carries the window, every tab with it, onto the Space
+-- showing on its display, where Accessibility can see it again.  Selecting the
+-- tab that is already active does nothing, which is why it takes two: `via` is
+-- any other tab of the same window, and `active` is selected again afterwards
+-- so the pane comes back showing what it showed.  The only thing on this system
+-- that moves another app's window between Spaces -- hs.spaces claims it and
+-- moves nothing -- and nothing is closed or rebuilt.
+--@param via integer     an inactive tab of the window
+--@param active integer  the tab to leave selected
+--@return boolean, string|nil
+function M.hopTabs(via, active)
+  local _, err = runAS(string.format([[
+tell application "Finder"
+  set index of window id %d to 1
+  set index of window id %d to 1
+end tell]], via, active))
+  if err then return false, err end
+  return true, nil
+end
+
+--- Close several tabs by id in one AppleScript call.
+-- One call rather than one per tab: Hammerspoon delivers the windowDestroyed of
+-- each close while the next round trip is still running, so closing a pane tab
+-- by tab let the model react half way through -- and it is much faster.  The
+-- real window cannot be closed as a whole: AppleScript only knows tabs, and the
+-- close button belongs to Accessibility, which cannot see a window on another
+-- Space -- the very case this is used for.  A tab that is already gone is
+-- skipped, not an error.
+--@param ids integer[]
+--@return integer|nil closed, string|nil err
+function M.closeTabs(ids)
+  if #ids == 0 then return 0, nil end
+  local list = {}
+  for i, id in ipairs(ids) do list[i] = string.format("%d", id) end
+  local n, err = runAS(string.format([[
+tell application "Finder"
+  set n to 0
+  repeat with i in {%s}
+    try
+      close window id (contents of i)
+      set n to n + 1
+    end try
+  end repeat
+  return n
+end tell]], table.concat(list, ", ")))
+  if err then return nil, err end
+  return tonumber(n) or 0, nil
 end
 
 --- Show or hide one window's toolbar.  Buys back ~20px of minimum height.
